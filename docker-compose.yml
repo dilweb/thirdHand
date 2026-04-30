@@ -1,0 +1,91 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: thirdhand-postgres
+    environment:
+      POSTGRES_USER: thirdhand
+      POSTGRES_PASSWORD: thirdhand
+      POSTGRES_DB: thirdhand
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U thirdhand"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: thirdhand-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  bot:
+    build: .
+    container_name: thirdhand-bot
+    command: python -m src.thirdhand.bot.main
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://thirdhand:thirdhand@postgres:5432/thirdhand
+      - DATABASE_URL_SYNC=postgresql://thirdhand:thirdhand@postgres:5432/thirdhand
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: thirdhand-worker
+    command: celery -A src.thirdhand.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://thirdhand:thirdhand@postgres:5432/thirdhand
+      - DATABASE_URL_SYNC=postgresql://thirdhand:thirdhand@postgres:5432/thirdhand
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  beat:
+    build: .
+    container_name: thirdhand-beat
+    command: celery -A src.thirdhand.celery_app beat --loglevel=info
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://thirdhand:thirdhand@postgres:5432/thirdhand
+      - DATABASE_URL_SYNC=postgresql://thirdhand:thirdhand@postgres:5432/thirdhand
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
