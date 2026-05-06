@@ -7,6 +7,8 @@ from src.thirdhand.agent.nodes import (
     filter_results_node,
     generate_response_node,
     parse_input_node,
+    resolve_task_context_node,
+    run_browser_task_node,
     router_node,
     save_reminder_node,
     update_profile_node,
@@ -31,10 +33,12 @@ def build_graph() -> StateGraph:
 
     # === Add nodes ===
     workflow.add_node("parse_input", parse_input_node)
+    workflow.add_node("resolve_task_context", resolve_task_context_node)
     workflow.add_node("validate_datetime", validate_datetime_node)
     workflow.add_node("save_reminder", save_reminder_node)
     workflow.add_node("execute_search", execute_search_node)
     workflow.add_node("filter_results", filter_results_node)
+    workflow.add_node("run_browser_task", run_browser_task_node)
     workflow.add_node("update_profile", update_profile_node)
     workflow.add_node("generate_response", generate_response_node)
 
@@ -42,13 +46,16 @@ def build_graph() -> StateGraph:
     workflow.set_entry_point("parse_input")
 
     # === Add edges ===
-    # After parsing, route based on intent
+    workflow.add_edge("parse_input", "resolve_task_context")
+
+    # After analysis and context resolution, route based on intent/capabilities
     workflow.add_conditional_edges(
-        "parse_input",
+        "resolve_task_context",
         route_by_intent,
         {
             "validate_datetime": "validate_datetime",
             "execute_search": "execute_search",
+            "run_browser_task": "run_browser_task",
             "update_profile": "update_profile",
             "generate_response": "generate_response",
         },
@@ -61,6 +68,9 @@ def build_graph() -> StateGraph:
     # Search flow
     workflow.add_edge("execute_search", "filter_results")
     workflow.add_edge("filter_results", "generate_response")
+
+    # Browser automation flow
+    workflow.add_edge("run_browser_task", "generate_response")
 
     # Profile flow
     workflow.add_edge("update_profile", "generate_response")

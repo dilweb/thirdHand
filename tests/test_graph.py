@@ -21,10 +21,12 @@ class TestGraphCompilation:
 
         assert "__start__" in node_names
         assert "parse_input" in node_names
+        assert "resolve_task_context" in node_names
         assert "validate_datetime" in node_names
         assert "save_reminder" in node_names
         assert "execute_search" in node_names
         assert "filter_results" in node_names
+        assert "run_browser_task" in node_names
         assert "update_profile" in node_names
         assert "generate_response" in node_names
 
@@ -37,15 +39,25 @@ class TestRouterNode:
         state = AgentState(intent="reminder")
         assert router_node(state) == "validate_datetime"
 
+    def test_route_existing_response_first(self) -> None:
+        """If parsing already produced a user-facing response, stop routing further."""
+        state = AgentState(response_text="Уточни город")
+        assert router_node(state) == "generate_response"
+
     def test_route_search(self) -> None:
         """Test routing to search flow."""
-        state = AgentState(intent="search")
+        state = AgentState(intent="chat", requires_web_search=True)
         assert router_node(state) == "execute_search"
 
     def test_route_profile_update(self) -> None:
         """Test routing to profile update flow."""
         state = AgentState(intent="profile_update")
         assert router_node(state) == "update_profile"
+
+    def test_route_browser_task(self) -> None:
+        """Test routing to browser flow."""
+        state = AgentState(intent="chat", requires_browser=True)
+        assert router_node(state) == "run_browser_task"
 
     def test_route_chat(self) -> None:
         """Test routing to chat flow (default)."""

@@ -14,13 +14,25 @@ class TestAgentState:
         assert state.message_text == ""
         assert state.intent == "chat"
         assert state.entities == {}
+        assert state.requires_web_search is False
+        assert state.requires_browser is False
+        assert state.routing_reason == ""
+        assert state.user_goal == ""
+        assert state.required_context == []
+        assert state.missing_context == []
+        assert state.clarification_question == ""
         assert state.reminder_id is None
         assert state.reminder_title == ""
         assert state.reminder_datetime == ""
         assert state.reminder_description == ""
         assert state.search_query == ""
         assert state.search_results == []
+        assert state.search_answer == ""
         assert state.profile_updates == {}
+        assert state.browser_goal == ""
+        assert state.browser_trace == []
+        assert state.browser_final_url == ""
+        assert state.browser_needs_user_input is False
         assert state.response_text == ""
         assert state.response_type == "text"
         assert state.conversation_history == []

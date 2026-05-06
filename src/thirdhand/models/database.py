@@ -39,7 +39,7 @@ async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-async def get_session() -> AsyncSession:
+def get_session() -> AsyncSession:
     """Get a single async session (for non-request contexts)."""
     return async_session_factory()
 

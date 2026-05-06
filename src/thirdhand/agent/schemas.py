@@ -1,0 +1,83 @@
+"""Pydantic contracts shared between agent nodes and services."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class TaskAnalysis(BaseModel):
+    """Structured task analysis returned by the LLM."""
+
+    intent: str = Field(
+        description="The primary intent: 'reminder', 'chat', 'profile_update', 'search', or 'browser_task'"
+    )
+    title: str = Field(default="", description="Title for reminders")
+    remind_at: str = Field(default="", description="When to remind (for reminders)")
+    description: str = Field(default="", description="Reminder description")
+    search_query: str = Field(default="", description="Search query")
+    topic: str = Field(default="", description="Topic for interests")
+    keywords: list[str] = Field(default_factory=list, description="Keywords for interests")
+    browser_goal: str = Field(default="", description="Browser automation goal in the user's own words")
+    user_goal: str = Field(default="", description="Short normalized description of the user's actual goal.")
+    requires_web_search: bool = Field(
+        default=False,
+        description="True when the assistant needs fresh information from the open web to answer well.",
+    )
+    requires_browser: bool = Field(
+        default=False,
+        description="True when the assistant needs to actively operate a website or browser UI.",
+    )
+    routing_reason: str = Field(
+        default="",
+        description="A short reason explaining why web search or browser control is required.",
+    )
+    required_context: list[str] = Field(
+        default_factory=list,
+        description="Required slots or context needed to complete the task, such as location, date, site, or item.",
+    )
+    missing_context: list[str] = Field(
+        default_factory=list,
+        description="Required context that is still missing after considering the user's message and saved profile.",
+    )
+    clarification_question: str = Field(
+        default="",
+        description="Ask this only if missing_context is non-empty and the assistant cannot proceed safely.",
+    )
+    response_needed: bool = Field(
+        default=True,
+        description="Whether a response to the user is needed",
+    )
+
+
+class ContextResolutionResult(BaseModel):
+    """Result of deciding whether we can proceed or must clarify first."""
+
+    requires_web_search: bool | None = None
+    requires_browser: bool | None = None
+    response_text: str = ""
+    response_type: str = "text"
+
+
+class SearchResult(BaseModel):
+    """Normalized single search hit."""
+
+    title: str = "Без названия"
+    url: str = ""
+    snippet: str = ""
+
+
+class SearchProviderResponse(BaseModel):
+    """Normalized response from an external web search provider."""
+
+    answer: str = ""
+    results: list[SearchResult] = Field(default_factory=list)
+
+
+class SearchExecutionResult(BaseModel):
+    """Validated result passed from search execution to downstream nodes."""
+
+    search_results: list[SearchResult] = Field(default_factory=list)
+    search_answer: str = ""
+    search_query: str = ""
+    response_text: str = ""
+    response_type: str = "search_results"

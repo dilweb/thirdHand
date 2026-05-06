@@ -17,8 +17,15 @@ class AgentState:
     message_text: str = ""
 
     # === Parsed data (from parse_input node) ===
-    intent: str = "chat"  # "reminder" | "search" | "chat" | "profile_update"
+    intent: str = "chat"  # "reminder" | "search" | "chat" | "profile_update" | "browser_task"
     entities: dict[str, Any] = field(default_factory=dict)
+    requires_web_search: bool = False
+    requires_browser: bool = False
+    routing_reason: str = ""
+    user_goal: str = ""
+    required_context: list[str] = field(default_factory=list)
+    missing_context: list[str] = field(default_factory=list)
+    clarification_question: str = ""
 
     # === Reminder flow ===
     reminder_id: int | None = None
@@ -29,9 +36,16 @@ class AgentState:
     # === Search flow ===
     search_query: str = ""
     search_results: list[dict[str, Any]] = field(default_factory=list)
+    search_answer: str = ""
 
     # === Profile flow ===
     profile_updates: dict[str, Any] = field(default_factory=dict)
+
+    # === Browser automation flow ===
+    browser_goal: str = ""
+    browser_trace: list[str] = field(default_factory=list)
+    browser_final_url: str = ""
+    browser_needs_user_input: bool = False
 
     # === Output (to bot handler) ===
     response_text: str = ""

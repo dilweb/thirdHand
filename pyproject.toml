@@ -25,7 +25,8 @@ dependencies = [
     "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
     "langchain-openai>=0.2.0",
-    
+    "playwright>=1.54.0",
+
     # Celery
     "celery[redis]>=5.4.0",
     

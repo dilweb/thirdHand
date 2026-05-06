@@ -122,8 +122,8 @@ async def extract_bio_facts(
     logger.info(
         "bio_facts_extracted",
         identity=result.identity,
-        stack=result.tech_stack[:3],
-        interests=result.interests[:3],
+        tech_stack_preview=result.tech_stack[:3],
+        interests_preview=result.interests[:3],
     )
 
     return result

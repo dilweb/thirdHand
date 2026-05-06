@@ -33,6 +33,13 @@ class Settings(BaseSettings):
 
     # Search
     TAVILY_API_KEY: str = ""
+    SEARCH_MAX_RESULTS: int = 5
+
+    # Browser automation
+    BROWSER_HEADLESS: bool = False
+    BROWSER_PROFILE_DIR: str = ".browser-profile"
+    BROWSER_MAX_STEPS: int = 18
+    BROWSER_SNAPSHOT_TEXT_LIMIT: int = 4000
 
     # Timezone
     DEFAULT_TIMEZONE: str = "Asia/Almaty"

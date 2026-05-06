@@ -32,7 +32,7 @@ async def cmd_start(message: Message, session: AsyncSession) -> None:
     is_new = not profile.context_summary
 
     welcome = (
-        "👋 Привет! Я твоя <b>третья рука</b> — твой персональный AI-ассистент.\n"
+        "👋 Привет! Я <b>thirdHand</b> — твоя <b>третья рука</b> и персональный AI-ассистент.\n"
         "Я могу:\n"
         "•  <b>Напоминать</b> о событиях\n"
         "•  <b>Искать</b> информацию\n"
@@ -64,7 +64,8 @@ async def cmd_help(message: Message) -> None:
         "\n💬 <b>Примеры:</b>\n"
         "• 'напомни завтра в 10:00 о созвоне'\n"
         "• 'найди новые модели OpenAI'\n"
-        "• 'я работаю с Python и LangChain'"
+        "• 'я работаю с Python и LangChain'\n"
+        "• 'зайди на hh.ru, найди 3 вакансии AI-инженера и подготовь отклики'"
     )
 
 
@@ -162,10 +163,13 @@ async def _background_bio_extract(
     """Extract and save bio facts in background."""
     from src.thirdhand.models import get_session
 
-    facts = await extract_bio_facts(user_message, assistant_message, existing_profile)
-    if facts:
-        async with get_session() as session:
-            profile = await UserProfileQueries.get_or_create(session, user_id)
-            profile.context_summary = merge_facts(profile.context_summary, facts)
-            await session.commit()
-            logger.info("bio_saved", user_id=user_id)
+    try:
+        facts = await extract_bio_facts(user_message, assistant_message, existing_profile)
+        if facts:
+            async with get_session() as session:
+                profile = await UserProfileQueries.get_or_create(session, user_id)
+                profile.context_summary = merge_facts(profile.context_summary, facts)
+                await session.commit()
+                logger.info("bio_saved", user_id=user_id)
+    except Exception as e:
+        logger.exception("background_bio_extract_failed", user_id=user_id, error=str(e))
