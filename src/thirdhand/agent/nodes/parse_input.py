@@ -1,6 +1,7 @@
 """Parse input node - analyzes the user's task and required capabilities."""
 
 import json
+from typing import Any
 
 import structlog
 from langchain_core.prompts import ChatPromptTemplate
@@ -37,7 +38,7 @@ Do not rely on surface keywords only. Base the decision on the user's actual goa
 Use browser_task for tasks that need action in a logged-in site or multi-step UI flow.
 Use search for information-seeking tasks that can be solved with web results only.
 If the user omitted a required detail, first try to resolve it from the saved profile.
-If there is a pending task and the current message plausibly answers the missing context for that task, continue that task instead of starting a brand-new one.
+If there is a pending task, explicitly decide whether the current message continues that task. Set continue_pending_task=true only when the message is best understood as staying within that unresolved task; otherwise set it to false.
 Only put something into missing_context if it is truly required and still unavailable.
 If missing_context is not empty, set a short clarification_question and avoid fabricating a query.
 **Never** claim in clarification_question that you already performed a browser/UI action (typing a phone number, clicking, logging in). This classifier has **no** Playwright/runtime proof; only the browser subgraph does. Ask only what is missing, neutrally — do not assume the page is waiting for SMS specifically.
@@ -51,7 +52,9 @@ Examples:
 - "я работаю питон разработчиком" → intent=profile_update, requires_web_search=false, requires_browser=false, topic="programming", keywords=["python", "developer"]
 - "прочитай последние 10 писем в яндекс почте и удали спам" → intent=browser_task, requires_web_search=false, requires_browser=true, browser_goal="прочитай последние 10 писем в яндекс почте и удали спам"
 - "зайди на hh.ru и откликнись на 3 вакансии" → intent=browser_task, requires_web_search=false, requires_browser=true
-- pending task says browser_task is waiting for the next manual step, user says "готово" or "продолжай" → continue the same browser_task, requires_browser=true, browser_goal should stay tied to the pending task instead of starting a new chat
+- pending task says browser_task is waiting for the next manual step, user says "готово" or "продолжай" → continue_pending_task=true, intent=browser_task, requires_browser=true, browser_goal should stay tied to the pending task instead of starting a new chat
+- pending browser task exists, user asks "ты использовал распознавание картинки?" → continue_pending_task=true, intent=chat, requires_browser=false, answer the question within the active task context and keep the task resumable
+- pending browser task exists, user says "теперь зайди в gmail и проверь письма" → continue_pending_task=false because this is a brand-new task
 - saved profile says location=Алматы, user says "погода в моем городе" → intent=search, requires_web_search=true, requires_browser=false, required_context=["location"], missing_context=[], search_query="погода сейчас в Алматы"
 - no saved location, user says "погода в моем городе" → intent=search, requires_web_search=false, requires_browser=false, required_context=["location"], missing_context=["location"], clarification_question="В каком городе посмотреть погоду?"
 - "привет, как дела?" → intent=chat, requires_web_search=false, requires_browser=false"""
@@ -96,6 +99,86 @@ def looks_like_pending_browser_followup(message_text: str) -> bool:
 def _looks_like_pending_followup(message_text: str) -> bool:
     """Backward-compatible alias within this module."""
     return looks_like_pending_browser_followup(message_text)
+
+
+def _pending_browser_waiting(pending_task: dict[str, Any]) -> bool:
+    """True when there is an unresolved browser task waiting for the user."""
+    if not isinstance(pending_task, dict):
+        return False
+    return (
+        pending_task.get("intent") == "browser_task"
+        and bool(pending_task.get("requires_browser"))
+        and bool(pending_task.get("awaiting_user_step"))
+    )
+
+
+def _active_task_goal_from_pending(pending_task: dict[str, Any]) -> str:
+    """Stable task goal suitable for prompt/context reuse across all sites."""
+    return (
+        derive_canonical_objective_from_pending(pending_task)
+        or str(pending_task.get("user_goal", "") or "").strip()
+        or str(pending_task.get("browser_goal", "") or "").strip()
+    )
+
+
+def _summarize_active_task_context(pending_task: dict[str, Any]) -> dict[str, Any]:
+    """Compact generic task context that can be injected into chat without site-specific logic."""
+    if not isinstance(pending_task, dict) or not pending_task:
+        return {}
+    keys = (
+        "intent",
+        "user_goal",
+        "canonical_user_objective",
+        "requires_browser",
+        "requires_web_search",
+        "awaiting_user_step",
+        "blocker_type",
+        "browser_final_url",
+        "browser_debug_note",
+        "browser_next_user_action",
+        "browser_resume_strategy",
+        "browser_stop_reason",
+        "browser_sub_intent",
+        "clarification_question",
+        "missing_context",
+    )
+    out: dict[str, Any] = {}
+    for key in keys:
+        value = pending_task.get(key)
+        if value not in (None, "", [], {}):
+            out[key] = value
+    return out
+
+
+def _hydrate_browser_continuation_from_pending(
+    *,
+    pending_task: dict[str, Any],
+    latest_user_message: str,
+    output: dict[str, Any],
+) -> None:
+    """Keep browser continuations anchored to the existing task while letting the LLM choose intent."""
+    canon = (
+        _active_task_goal_from_pending(pending_task)
+        or str(output.get("canonical_user_objective", "") or "").strip()
+        or str(output.get("user_goal", "") or "").strip()
+        or latest_user_message.strip()
+    )
+    resume_url = str(pending_task.get("browser_final_url", "") or "").strip()
+    output["user_goal"] = canon
+    output["canonical_user_objective"] = canon
+    output["browser_goal_display"] = truncate_display_title(canon)
+    output["browser_goal"] = build_operational_browser_goal(
+        canonical_objective=canon,
+        latest_user_message=latest_user_message,
+        resume_url=resume_url,
+    )
+    output["entities"]["user_goal"] = canon
+    output["entities"]["browser_goal"] = output["browser_goal"]
+    output["entities"]["canonical_user_objective"] = canon
+    output["entities"]["browser_goal_display"] = output["browser_goal_display"]
+    persisted_si = str(pending_task.get("browser_sub_intent") or "").strip()
+    output["browser_sub_intent"] = persisted_si or infer_browser_sub_intent(canon).value
+    output["entities"]["browser_sub_intent"] = output["browser_sub_intent"]
 
 
 def _fallback_task_analysis(message_text: str) -> TaskAnalysis:
@@ -189,61 +272,9 @@ def parse_input_node(state: AgentState) -> dict:
         Dictionary with intent, entities, and extracted fields.
     """
     pending_task = state.pending_task or {}
-    if (
-        pending_task.get("intent") == "browser_task"
-        and pending_task.get("requires_browser")
-        and pending_task.get("awaiting_user_step")
-        and pending_task.get("blocker_type", "other") != "other"
-        and looks_like_pending_browser_followup(state.message_text)
-    ):
-        canonical = derive_canonical_objective_from_pending(pending_task) or state.message_text
-        blocker_type = pending_task.get("blocker_type", "") or "other"
-        browser_final_url = pending_task.get("browser_final_url", "") or ""
-        operational_goal = build_operational_browser_goal(
-            canonical_objective=canonical,
-            latest_user_message=state.message_text,
-            resume_url=browser_final_url,
-        )
-        goal_display = truncate_display_title(canonical)
-        logger.info(
-            "browser_pending_task_resumed",
-            user_id=state.user_id,
-            blocker_type=blocker_type,
-            browser_final_url=browser_final_url,
-            canonical_objective=preview_for_log(canonical, limit=500),
-            reply_text=preview_for_log(state.message_text, limit=200),
-        )
-        persisted_si = str(pending_task.get("browser_sub_intent") or "").strip()
-        resumed_sub_intent = persisted_si or infer_browser_sub_intent(canonical).value
-        return {
-            "intent": "browser_task",
-            "requires_web_search": False,
-            "requires_browser": True,
-            "routing_reason": "Resuming a pending browser task after the user completed a manual browser step.",
-            "user_goal": canonical,
-            "required_context": [],
-            "missing_context": [],
-            "clarification_question": "",
-            "ambiguous_request": False,
-            "canonical_user_objective": canonical,
-            "browser_goal_display": goal_display,
-            "browser_goal": operational_goal,
-            "browser_sub_intent": resumed_sub_intent,
-            "entities": {
-                "browser_goal": operational_goal,
-                "user_goal": canonical,
-                "canonical_user_objective": canonical,
-                "browser_goal_display": goal_display,
-                "requires_web_search": False,
-                "requires_browser": True,
-                "routing_reason": "Resuming a pending browser task after the user completed a manual browser step.",
-                "required_context": [],
-                "missing_context": [],
-                "clarification_question": "",
-                "ambiguous_request": False,
-                "browser_sub_intent": resumed_sub_intent,
-            },
-        }
+    active_task_context = dict(pending_task) if isinstance(pending_task, dict) else {}
+    active_task_intent = str(pending_task.get("intent", "") or "").strip()
+    active_task_goal = _active_task_goal_from_pending(pending_task)
 
     profile_context = json.dumps(
         state.user_profile.get("context_summary", {}) or {},
@@ -354,6 +385,11 @@ def parse_input_node(state: AgentState) -> dict:
         "missing_context": analysis.missing_context,
         "clarification_question": analysis.clarification_question,
         "ambiguous_request": False,
+        "continue_pending_task": bool(analysis.continue_pending_task),
+        "active_task_intent": active_task_intent,
+        "active_task_goal": active_task_goal,
+        "active_task_context": active_task_context,
+        "preserve_pending_task": False,
         "entities": {
             "title": analysis.title,
             "remind_at": analysis.remind_at,
@@ -372,6 +408,7 @@ def parse_input_node(state: AgentState) -> dict:
             "missing_context": analysis.missing_context,
             "clarification_question": analysis.clarification_question,
             "ambiguous_request": False,
+            "continue_pending_task": bool(analysis.continue_pending_task),
         },
     }
 
@@ -430,6 +467,22 @@ def parse_input_node(state: AgentState) -> dict:
         output["entities"]["canonical_user_objective"] = output["canonical_user_objective"]
         output["entities"]["browser_goal_display"] = output["browser_goal_display"]
 
+    if (
+        _pending_browser_waiting(pending_task)
+        and bool(analysis.continue_pending_task)
+        and output["requires_browser"]
+    ):
+        _hydrate_browser_continuation_from_pending(
+            pending_task=pending_task,
+            latest_user_message=state.message_text,
+            output=output,
+        )
+        output["routing_reason"] = (
+            output["routing_reason"]
+            or "Continuing the active browser task with the latest user message."
+        )
+        output["entities"]["routing_reason"] = output["routing_reason"]
+
     if intent == "browser_task":
         output["requires_browser"] = True
         output["entities"]["requires_browser"] = True
@@ -444,12 +497,24 @@ def parse_input_node(state: AgentState) -> dict:
         output["entities"]["ambiguous_request"] = True
 
     if output["requires_browser"] and output.get("browser_goal"):
-        output["browser_sub_intent"] = infer_browser_sub_intent(
-            output.get("canonical_user_objective") or output["browser_goal"]
-        ).value
+        output["browser_sub_intent"] = str(output.get("browser_sub_intent", "") or "").strip() or (
+            infer_browser_sub_intent(
+                output.get("canonical_user_objective") or output["browser_goal"]
+            ).value
+        )
     else:
         output["browser_sub_intent"] = ""
     output["entities"]["browser_sub_intent"] = output["browser_sub_intent"]
+
+    if (
+        active_task_intent
+        and bool(analysis.continue_pending_task)
+        and intent == "chat"
+        and not output["requires_browser"]
+        and not output["requires_web_search"]
+        and not output["missing_context"]
+    ):
+        output["preserve_pending_task"] = bool(pending_task.get("awaiting_user_step"))
 
     logger.info(
         "intent_classified",

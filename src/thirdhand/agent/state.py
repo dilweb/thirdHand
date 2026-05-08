@@ -75,5 +75,9 @@ class AgentState:
     conversation_history: list[dict[str, str]] = field(default_factory=list)
     user_profile: dict[str, Any] = field(default_factory=dict)
     pending_task: dict[str, Any] = field(default_factory=dict)
+    active_task_intent: str = ""
+    active_task_goal: str = ""
+    active_task_context: dict[str, Any] = field(default_factory=dict)
+    preserve_pending_task: bool = False
     db_session: Any = None
     status_callback: Any = None

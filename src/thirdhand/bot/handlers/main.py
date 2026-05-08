@@ -13,7 +13,6 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.thirdhand.agent.nodes.parse_input import looks_like_pending_browser_followup
 from src.thirdhand.agent.graph import graph
 from src.thirdhand.agent.schemas import PendingTask
 from src.thirdhand.agent.state import AgentState
@@ -26,7 +25,6 @@ from src.thirdhand.services.context_builder import (
 )
 from src.thirdhand.services.telegram_format import format_agent_reply_for_telegram
 from src.thirdhand.services.browser_agent import discard_parked_browser_session_for_user
-from src.thirdhand.services.browser_reporting import format_pending_browser_diagnostic_reply
 
 logger = structlog.get_logger(__name__)
 router = Router()
@@ -44,26 +42,6 @@ async def _answer_text_in_chunks(message: Message, text: str) -> None:
         piece = chunk[:_TELEGRAM_MESSAGE_MAX]
         chunk = chunk[_TELEGRAM_MESSAGE_MAX:]
         await message.answer(piece)
-
-
-def _looks_like_browser_diagnostic_question(message_text: str) -> bool:
-    """Detect direct questions about why a browser task failed or got blocked."""
-    normalized = " ".join((message_text or "").lower().split())
-    if not normalized:
-        return False
-    return any(
-        phrase in normalized
-        for phrase in (
-            "что пошло не так",
-            "что помешало",
-            "почему не получилось",
-            "почему не сработало",
-            "почему не смог",
-            "где застрял",
-            "на чем застрял",
-            "что случилось",
-        )
-    )
 
 
 async def _register_active_run(user_id: int) -> int:
@@ -241,51 +219,6 @@ async def handle_message(
         # Build context prompt
         context_text = build_context_prompt(context_summary, session_summaries, history)
         pending_task = await redis_history.get_pending_task(user_id)
-        if pending_task and _looks_like_browser_diagnostic_question(text):
-            response_text = format_pending_browser_diagnostic_reply(pending_task=pending_task)
-            if response_text:
-                await redis_history.push_message(user_id, "user", text)
-                await redis_history.push_message(user_id, "assistant", response_text)
-                await message.answer(format_agent_reply_for_telegram(response_text))
-                logger.info(
-                    "browser_diagnostic_answered_from_pending_task",
-                    user_id=user_id,
-                    run_id=run_id,
-                    text_preview=text[:200],
-                )
-                return
-        # Drop browser pending only when it can't resume meaningfully — not on every longer message or
-        # when blocker stayed at default 'other' but we still have browser_final_url (e.g. step limit).
-        if pending_task and pending_task.get("awaiting_user_step"):
-            bt = (pending_task.get("blocker_type") or "").strip() or "other"
-            resume_url_set = bool((pending_task.get("browser_final_url") or "").strip())
-            if bt == "other" and not resume_url_set:
-                logger.info(
-                    "pending_task_ignored_for_new_request",
-                    user_id=user_id,
-                    run_id=run_id,
-                    pending_task_id=pending_task.get("task_id", ""),
-                    pending_intent=pending_task.get("intent", ""),
-                    reason="stale_browser_pending_other_no_url",
-                    text_preview=text[:200],
-                )
-                pending_task = {}
-            elif (
-                bt == "other"
-                and resume_url_set
-                and not looks_like_pending_browser_followup(text)
-                and len(text.strip()) > 220
-            ):
-                logger.info(
-                    "pending_task_ignored_for_new_request",
-                    user_id=user_id,
-                    run_id=run_id,
-                    pending_task_id=pending_task.get("task_id", ""),
-                    pending_intent=pending_task.get("intent", ""),
-                    reason="fresh_long_message_supersedes_stale_placeholder",
-                    text_preview=text[:200],
-                )
-                pending_task = {}
         status_message = None
         last_status_text = ""
 
@@ -520,6 +453,12 @@ async def _sync_pending_task(user_id: int, user_message: str, result: dict) -> N
         )
         await redis_history.set_pending_task(user_id, pending.model_dump())
         return
+
+    if bool(result.get("preserve_pending_task", False)):
+        active_task_context = result.get("active_task_context") or {}
+        if isinstance(active_task_context, dict) and active_task_context:
+            await redis_history.set_pending_task(user_id, active_task_context)
+            return
 
     await redis_history.clear_pending_task(user_id)
 

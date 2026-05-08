@@ -49,6 +49,10 @@ class TaskAnalysis(BaseModel):
         default="",
         description="Ask this only if missing_context is non-empty and the assistant cannot proceed safely.",
     )
+    continue_pending_task: bool = Field(
+        default=False,
+        description="True when the current user message should stay within the already pending unresolved task rather than start a fresh task.",
+    )
     response_needed: bool = Field(
         default=True,
         description="Whether a response to the user is needed",

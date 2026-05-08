@@ -182,19 +182,18 @@ class TestHandleMessage:
         mock_message.answer.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_message_browser_diagnostic_without_debug_note(
+    async def test_handle_message_routes_diagnostic_question_through_graph(
         self, mock_message: Message, mock_session
     ) -> None:
-        """Diagnostic replies can use next_user_action / resume_strategy when debug_note is empty."""
-        mock_message.text = "что пошло не так"
+        """Questions about an active browser task should still go through the graph, not a handler shortcut."""
+        mock_message.text = "ты использовал тул для распознавания картинки?"
         mock_profile = MagicMock()
         mock_profile.context_summary = {}
         mock_profile.session_summaries = []
 
         pending = {
-            "browser_debug_note": "",
-            "browser_next_user_action": "Введи код из SMS",
-            "browser_resume_strategy": "await_user_message",
+            "intent": "browser_task",
+            "awaiting_user_step": True,
             "browser_final_url": "https://example.com/2fa",
         }
 
@@ -228,14 +227,11 @@ class TestHandleMessage:
                 return_value=mock_profile,
             ),
         ):
+            mock_graph.ainvoke = AsyncMock(return_value=dict(_GRAPH_STUB_RESULT))
             await handle_message(mock_message, mock_session)
 
-        mock_graph.ainvoke.assert_not_called()
+        mock_graph.ainvoke.assert_awaited_once()
         mock_message.answer.assert_awaited()
-        answer = mock_message.answer.call_args[0][0]
-        assert "Введи код из SMS" in answer
-        assert "Стратегия продолжения" in answer
-        assert "example.com/2fa" in answer
 
 
 @pytest.mark.asyncio
@@ -297,3 +293,34 @@ async def test_sync_pending_browser_clarification_sets_awaiting_step() -> None:
     payload = mock_set.call_args[0][1]
     assert payload["awaiting_user_step"] is True
     assert payload["blocker_type"] == "missing_info"
+
+
+@pytest.mark.asyncio
+async def test_sync_pending_task_preserves_active_browser_task_for_chat_followup() -> None:
+    pending = {
+        "intent": "browser_task",
+        "requires_browser": True,
+        "awaiting_user_step": True,
+        "browser_goal": "Откликнуться на вакансии",
+        "browser_final_url": "https://hh.ru/search/vacancy",
+    }
+    result = {
+        "intent": "chat",
+        "preserve_pending_task": True,
+        "active_task_context": pending,
+    }
+
+    with (
+        patch(
+            "src.thirdhand.bot.handlers.main.redis_history.set_pending_task",
+            new_callable=AsyncMock,
+        ) as mock_set,
+        patch(
+            "src.thirdhand.bot.handlers.main.redis_history.clear_pending_task",
+            new_callable=AsyncMock,
+        ) as mock_clear,
+    ):
+        await _sync_pending_task(7, "что случилось?", result)
+
+    mock_set.assert_awaited_once_with(7, pending)
+    mock_clear.assert_not_awaited()

@@ -1,11 +1,8 @@
-"""Tests for parse_input node fast paths."""
+"""Tests for parse_input pending-task behavior."""
 
-from src.thirdhand.agent.nodes.parse_input import (
-    looks_like_pending_browser_followup,
-    parse_input_node,
-)
-from src.thirdhand.agent.state import AgentState
+from src.thirdhand.agent.nodes.parse_input import looks_like_pending_browser_followup, parse_input_node
 from src.thirdhand.agent.schemas import TaskAnalysis
+from src.thirdhand.agent.state import AgentState
 
 
 class TestParseInputNode:
@@ -17,7 +14,18 @@ class TestParseInputNode:
         text = "зайди на hh вакансии\nвот номер для входа"
         assert looks_like_pending_browser_followup(text) is True
 
-    def test_resumes_pending_browser_task_when_step_limit_blocker(self) -> None:
+    def test_continue_pending_browser_task_is_llm_decision(self, monkeypatch) -> None:
+        def fake_safe_invoke(chain, llm_input, fallback=None):
+            return TaskAnalysis(
+                intent="browser_task",
+                browser_goal="Продолжить вход на hh.ru",
+                user_goal="Продолжить вход на hh.ru",
+                requires_browser=True,
+                requires_web_search=False,
+                continue_pending_task=True,
+            )
+
+        monkeypatch.setattr("src.thirdhand.agent.nodes.parse_input.safe_invoke", fake_safe_invoke)
         state = AgentState(
             user_id=123,
             message_text="продолжай",
@@ -25,6 +33,8 @@ class TestParseInputNode:
                 "intent": "browser_task",
                 "requires_browser": True,
                 "browser_goal": "Вход на hh.ru",
+                "canonical_user_objective": "Вход на hh.ru",
+                "browser_sub_intent": "browser_apply_to_targets",
                 "blocker_type": "missing_info",
                 "browser_final_url": "https://hh.ru/account/login",
                 "awaiting_user_step": True,
@@ -34,21 +44,67 @@ class TestParseInputNode:
         result = parse_input_node(state)
 
         assert result["intent"] == "browser_task"
+        assert result["continue_pending_task"] is True
+        assert result["requires_browser"] is True
         assert "USER_OBJECTIVE" in result["browser_goal"]
-        assert "продолжай" in result["browser_goal"]
         assert "https://hh.ru/account/login" in result["browser_goal"]
-        assert "https://hh.ru/account/login" in state.pending_task.get("browser_final_url", "")
+        assert result["user_goal"] == "Вход на hh.ru"
+        assert result["browser_sub_intent"] == "browser_apply_to_targets"
 
-    def test_resumes_pending_browser_task_on_ready_message(self) -> None:
+    def test_chat_question_can_stay_inside_pending_browser_task(self, monkeypatch) -> None:
+        def fake_safe_invoke(chain, llm_input, fallback=None):
+            return TaskAnalysis(
+                intent="chat",
+                user_goal="Спросить про предыдущий browser-шаг",
+                requires_browser=False,
+                requires_web_search=False,
+                continue_pending_task=True,
+            )
+
+        monkeypatch.setattr("src.thirdhand.agent.nodes.parse_input.safe_invoke", fake_safe_invoke)
         state = AgentState(
             user_id=123,
-            message_text="готово",
+            message_text="ты использовал тул для распознавания картинки?",
             pending_task={
                 "intent": "browser_task",
                 "requires_browser": True,
                 "browser_goal": "Откликнуться на вакансии Python на hh.ru",
-                "blocker_type": "login",
-                "browser_final_url": "https://hh.ru/account/login",
+                "canonical_user_objective": "Откликнуться на вакансии Python на hh.ru",
+                "browser_final_url": "https://hh.ru/search/vacancy",
+                "browser_debug_note": "Модель перестала вызывать инструменты",
+                "awaiting_user_step": True,
+            },
+        )
+
+        result = parse_input_node(state)
+
+        assert result["intent"] == "chat"
+        assert result["continue_pending_task"] is True
+        assert result["preserve_pending_task"] is True
+        assert result["active_task_intent"] == "browser_task"
+        assert result["active_task_context"]["browser_final_url"] == "https://hh.ru/search/vacancy"
+
+    def test_new_browser_task_does_not_get_forced_into_old_pending_context(self, monkeypatch) -> None:
+        def fake_safe_invoke(chain, llm_input, fallback=None):
+            return TaskAnalysis(
+                intent="browser_task",
+                browser_goal="Открыть Gmail и проверить входящие",
+                user_goal="Проверить Gmail",
+                requires_browser=True,
+                requires_web_search=False,
+                continue_pending_task=False,
+            )
+
+        monkeypatch.setattr("src.thirdhand.agent.nodes.parse_input.safe_invoke", fake_safe_invoke)
+        state = AgentState(
+            user_id=123,
+            message_text="теперь зайди в gmail и проверь письма",
+            pending_task={
+                "intent": "browser_task",
+                "requires_browser": True,
+                "browser_goal": "Оформить заказ",
+                "canonical_user_objective": "Оформить заказ",
+                "browser_final_url": "https://shop.example/checkout",
                 "awaiting_user_step": True,
             },
         )
@@ -56,50 +112,13 @@ class TestParseInputNode:
         result = parse_input_node(state)
 
         assert result["intent"] == "browser_task"
-        assert result["requires_browser"] is True
-        assert result["requires_web_search"] is False
-        assert "USER_OBJECTIVE" in result["browser_goal"]
-        assert "Откликнуться на вакансии Python на hh.ru" in result["browser_goal"]
-        assert result["user_goal"] == "Откликнуться на вакансии Python на hh.ru"
-
-    def test_resumes_pending_browser_task_without_keyword_heuristic(self) -> None:
-        state = AgentState(
-            user_id=123,
-            message_text="не могу пройти этот шаг, там другая форма",
-            pending_task={
-                "intent": "browser_task",
-                "requires_browser": True,
-                "browser_goal": "Оформить заказ",
-                "blocker_type": "confirmation",
-                "awaiting_user_step": True,
-            },
-        )
-
-        result = parse_input_node(state)
-
-        assert result["intent"] == "browser_task"
-        assert "Оформить заказ" in result["browser_goal"]
-        assert result["requires_browser"] is True
-
-    def test_does_not_auto_resume_pending_browser_task_for_other_blocker(self) -> None:
-        state = AgentState(
-            user_id=123,
-            message_text="откликнись на hh на вакансии python разработчик",
-            pending_task={
-                "intent": "browser_task",
-                "requires_browser": True,
-                "browser_goal": "Оформить заказ",
-                "blocker_type": "other",
-                "awaiting_user_step": True,
-            },
-        )
-
-        result = parse_input_node(state)
-
-        assert result["browser_goal"] != "Оформить заказ"
+        assert result["continue_pending_task"] is False
+        assert "shop.example" not in result["browser_goal"]
+        assert result["user_goal"] == "Проверить Gmail"
 
     def test_browser_task_always_forces_requires_browser_true(self, monkeypatch) -> None:
-        """Classifier sometimes sets requires_browser=false for 'provide password' follow-ups; we always run the browser."""
+        """Classifier sometimes sets requires_browser=false for browser continuations; parser normalizes it."""
+
         def fake_safe_invoke(chain, llm_input, fallback=None):
             return TaskAnalysis(
                 intent="browser_task",
@@ -110,16 +129,15 @@ class TestParseInputNode:
                 missing_context=["password_or_code"],
             )
 
-        monkeypatch.setattr(
-            "src.thirdhand.agent.nodes.parse_input.safe_invoke",
-            fake_safe_invoke,
-        )
+        monkeypatch.setattr("src.thirdhand.agent.nodes.parse_input.safe_invoke", fake_safe_invoke)
         state = AgentState(user_id=1, message_text="попробуй еще раз")
         result = parse_input_node(state)
 
         assert result["intent"] == "browser_task"
         assert result["requires_browser"] is True
         assert result["entities"]["requires_browser"] is True
+
+    def test_browser_missing_context_relaxed_for_autonomous_search(self, monkeypatch) -> None:
         state = AgentState(
             user_id=123,
             message_text="ты сам должен это сделать поищи на headhunter",
