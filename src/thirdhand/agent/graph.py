@@ -1,4 +1,14 @@
-"""LangGraph agent graph definition."""
+"""LangGraph agent graph definition.
+
+Phase I / Stage 22: The browser subsystem stays **service-local** (`browser_flow.py`, tool loop,
+sub-intents). This graph exposes a single ``run_browser_task`` node that delegates to
+``run_browser_task_node`` and then always continues to ``generate_response``.
+
+We intentionally do **not** nest a LangGraph subgraph for browser work: the real state machine
+already lives in the browser service layer, and an extra subgraph would add indirection without
+splitting graph-level concerns. Revisit if we later need multiple first-class LangGraph nodes
+for browser (for example distinct pre-check and execution stages with different reducers).
+"""
 
 from langgraph.graph import END, StateGraph
 
@@ -11,6 +21,7 @@ from src.thirdhand.agent.nodes import (
     run_browser_task_node,
     router_node,
     save_reminder_node,
+    synthesize_search_response_node,
     update_profile_node,
     validate_datetime_node,
 )
@@ -25,6 +36,9 @@ def route_by_intent(state: AgentState) -> str:
 def build_graph() -> StateGraph:
     """Build and compile the agent graph.
 
+    Browser tasks use one graph hop: ``run_browser_task`` → ``generate_response`` (see module
+    docstring / Stage 22).
+
     Returns:
         Compiled graph ready for invocation.
     """
@@ -38,6 +52,7 @@ def build_graph() -> StateGraph:
     workflow.add_node("save_reminder", save_reminder_node)
     workflow.add_node("execute_search", execute_search_node)
     workflow.add_node("filter_results", filter_results_node)
+    workflow.add_node("synthesize_search_response", synthesize_search_response_node)
     workflow.add_node("run_browser_task", run_browser_task_node)
     workflow.add_node("update_profile", update_profile_node)
     workflow.add_node("generate_response", generate_response_node)
@@ -67,7 +82,8 @@ def build_graph() -> StateGraph:
 
     # Search flow
     workflow.add_edge("execute_search", "filter_results")
-    workflow.add_edge("filter_results", "generate_response")
+    workflow.add_edge("filter_results", "synthesize_search_response")
+    workflow.add_edge("synthesize_search_response", "generate_response")
 
     # Browser automation flow
     workflow.add_edge("run_browser_task", "generate_response")

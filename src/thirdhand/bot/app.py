@@ -1,8 +1,6 @@
 """Aiogram bot initialization."""
 
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 
 from src.thirdhand.config import settings
 
@@ -13,12 +11,7 @@ def create_bot() -> Bot:
     Returns:
         Configured Bot instance.
     """
-    return Bot(
-        token=settings.BOT_TOKEN,
-        default=DefaultBotProperties(
-            parse_mode=ParseMode.HTML,
-        ),
-    )
+    return Bot(token=settings.BOT_TOKEN)
 
 
 def create_dispatcher() -> Dispatcher:

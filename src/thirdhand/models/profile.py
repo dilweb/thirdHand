@@ -1,6 +1,6 @@
 """UserProfile model for storing extended user preferences and context."""
 
-from typing import Any, Optional
+from typing import Any
 
 from sqlalchemy import BigInteger, ForeignKey, Identity, Integer
 from sqlalchemy.dialects.postgresql import JSONB
@@ -65,6 +65,5 @@ class UserProfile(Base, TimestampMixin):
 
     def __repr__(self) -> str:
         return (
-            f"<UserProfile(id={self.id}, user_id={self.user_id}, "
-            f"tokens={self.estimated_tokens})>"
+            f"<UserProfile(id={self.id}, user_id={self.user_id}, tokens={self.estimated_tokens})>"
         )

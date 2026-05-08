@@ -1,4 +1,4 @@
-"""History middleware - loads conversation history from Redis and saves after response."""
+"""History middleware - loads conversation history from Redis."""
 
 from typing import Any, Awaitable, Callable, Dict
 
@@ -12,10 +12,9 @@ logger = structlog.get_logger(__name__)
 
 
 class HistoryMiddleware(BaseMiddleware):
-    """Middleware that loads and saves conversation history.
+    """Middleware that loads conversation history.
 
     Before handler: loads history from Redis into data['history']
-    After handler: saves user message and bot response to Redis
     """
 
     async def __call__(
@@ -29,8 +28,6 @@ class HistoryMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         user_id = event.from_user.id
-        user_text = event.text
-
         # Load history from Redis
         history = await redis_history.get_history(
             user_id,
@@ -44,21 +41,4 @@ class HistoryMiddleware(BaseMiddleware):
             message_count=len(history),
         )
 
-        # Call handler
-        result = await handler(event, data)
-
-        # Save user message to history
-        await redis_history.push_message(user_id, "user", user_text)
-
-        # If handler sent a response, save it too
-        # The response is stored in data by the handler
-        bot_response = data.get("bot_response")
-        if bot_response:
-            await redis_history.push_message(user_id, "assistant", bot_response)
-            logger.debug(
-                "history_saved",
-                user_id=user_id,
-                messages=2,
-            )
-
-        return result
+        return await handler(event, data)

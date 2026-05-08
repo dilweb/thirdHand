@@ -12,5 +12,8 @@ COPY src/ ./src/
 # Install dependencies (skip current project install to avoid README issues)
 RUN poetry config virtualenvs.create false && poetry install --no-interaction --no-ansi --no-root
 
+# Install Playwright Chromium for browser automation in container environments
+RUN poetry run playwright install --with-deps chromium
+
 # Default command (overridden in docker-compose)
 CMD ["python", "-m", "src.thirdhand.bot.main"]

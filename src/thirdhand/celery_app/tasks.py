@@ -5,12 +5,14 @@ from datetime import datetime
 import structlog
 
 from src.thirdhand.celery_app import celery_app
+from src.thirdhand.bot.app import create_bot
+from src.thirdhand.config import settings
 from src.thirdhand.models import (
-    InterestQueries,
     ReminderQueries,
     ReminderStatus,
     UserProfileQueries,
     get_session,
+    get_sync_session,
 )
 from src.thirdhand.services import redis_history
 from src.thirdhand.services.llm import create_llm, safe_invoke
@@ -27,18 +29,44 @@ def send_reminder_notification(self, reminder_id: int) -> None:
     Args:
         reminder_id: ID of the reminder to send.
     """
-    # TODO: Import aiogram bot here to avoid circular imports
-    # from src.thirdhand.bot.app import create_bot
-    # bot = create_bot()
-    # asyncio.run(bot.send_message(chat_id=user_id, text=text))
+    session = get_sync_session()
+    try:
+        reminder = ReminderQueries.get_by_id_sync(session, reminder_id)
+        if reminder is None:
+            logger.warning("reminder_not_found", reminder_id=reminder_id)
+            return
+        if reminder.status != ReminderStatus.PENDING:
+            logger.info(
+                "reminder_already_processed",
+                reminder_id=reminder_id,
+                status=reminder.status,
+            )
+            return
 
-    logger.info("Sending reminder notification for reminder %d", reminder_id)
+        bot = create_bot()
+        try:
+            text = f"⏰ Напоминание: {reminder.title}"
+            if reminder.description:
+                text += f"\n{reminder.description}"
+            import asyncio
 
-    # For now, just log. Will be implemented when bot integration is ready.
-    # In production, this would:
-    # 1. Fetch reminder from DB
-    # 2. Send message via bot
-    # 3. Update reminder status to SENT
+            asyncio.run(bot.send_message(chat_id=reminder.user_id, text=text))
+            ReminderQueries.mark_as_sent_sync(
+                session=session,
+                reminder_id=reminder_id,
+            )
+            session.commit()
+            logger.info(
+                "reminder_notification_sent",
+                reminder_id=reminder_id,
+                user_id=reminder.user_id,
+            )
+        finally:
+            import asyncio
+
+            asyncio.run(bot.session.close())
+    finally:
+        session.close()
 
 
 @celery_app.task
@@ -97,10 +125,10 @@ def schedule_reminder(reminder_id: int, remind_at_iso: str) -> str:
     )
 
     logger.info(
-        "Scheduled reminder %d for %s (task: %s)",
-        reminder_id,
-        remind_at_iso,
-        task.id,
+        "reminder_task_scheduled",
+        reminder_id=reminder_id,
+        remind_at_iso=remind_at_iso,
+        celery_task_id=task.id,
     )
 
     return task.id
@@ -136,7 +164,9 @@ def summarize_session_history(user_id: int) -> None:
             return
 
         # Build summary via LLM
-        llm = create_llm(temperature=0.0)
+        llm = create_llm(
+            model=settings.SUMMARY_MODEL or settings.INTENT_MODEL or None, temperature=0.0
+        )
         from langchain_core.prompts import ChatPromptTemplate
         from pydantic import BaseModel, Field
 
@@ -146,13 +176,16 @@ def summarize_session_history(user_id: int) -> None:
             actions_taken: list[str] = Field(default_factory=list)
             key_facts: list[str] = Field(default_factory=list)
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", SUMMARIZE_PROMPT),
-            ("human", "Conversation:\n{history}"),
-        ])
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", SUMMARIZE_PROMPT),
+                ("human", "Conversation:\n{history}"),
+            ]
+        )
 
         history_text = "\n".join(
-            f"{m['role']}: {m['content']}" for m in history[:50]  # Limit for LLM
+            f"{m['role']}: {m['content']}"
+            for m in history[:50]  # Limit for LLM
         )
 
         chain = prompt | llm.with_structured_output(SessionSummary)

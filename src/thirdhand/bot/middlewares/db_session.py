@@ -4,7 +4,6 @@ from typing import Any, Awaitable, Callable, Dict
 
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.thirdhand.models import async_session_factory
 

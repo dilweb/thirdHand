@@ -7,16 +7,18 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from src.thirdhand.agent.schemas import TaskAnalysis
 from src.thirdhand.agent.state import AgentState
-from src.thirdhand.services.llm import create_llm, safe_invoke
+from src.thirdhand.config import settings
+from src.thirdhand.services.browser_flow import infer_browser_sub_intent
+from src.thirdhand.services.browser_goal_context import (
+    build_operational_browser_goal,
+    derive_canonical_objective_from_pending,
+    truncate_display_title,
+)
+from src.thirdhand.services.llm import create_llm, preview_for_log, safe_invoke
 
 logger = structlog.get_logger(__name__)
 
-
-INTENT_PROMPT = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """You are an intent classifier for a personal assistant Telegram bot.
+INTENT_SYSTEM_PROMPT = """You are an intent classifier for a personal assistant Telegram bot.
 Classify the user message into one of these intents:
 - **reminder**: User wants to be reminded of something at a specific time
 - **search**: User wants to search for information on a topic
@@ -25,17 +27,20 @@ Classify the user message into one of these intents:
 - **browser_task**: User wants you to operate websites, web apps, or a browser autonomously
 
 You also receive saved user profile context. Use it when it helps fill missing details.
+You also receive recent conversation history and an optional pending unresolved task.
 
 Also decide which capabilities are required:
 - **requires_web_search=true** when you need fresh information from the public internet
-- **requires_browser=true** when you must click, type, navigate, or otherwise control a website/app UI
+- **requires_browser=true** when you must click, type, navigate, or otherwise control a website/app UI (including when the user might next send a short token or answer for a field on the page).
 
 Do not rely on surface keywords only. Base the decision on the user's actual goal.
 Use browser_task for tasks that need action in a logged-in site or multi-step UI flow.
 Use search for information-seeking tasks that can be solved with web results only.
 If the user omitted a required detail, first try to resolve it from the saved profile.
+If there is a pending task and the current message plausibly answers the missing context for that task, continue that task instead of starting a brand-new one.
 Only put something into missing_context if it is truly required and still unavailable.
 If missing_context is not empty, set a short clarification_question and avoid fabricating a query.
+**Never** claim in clarification_question that you already performed a browser/UI action (typing a phone number, clicking, logging in). This classifier has **no** Playwright/runtime proof; only the browser subgraph does. Ask only what is missing, neutrally — do not assume the page is waiting for SMS specifically.
 
 Extract relevant entities based on the intent and capabilities.
 
@@ -46,17 +51,130 @@ Examples:
 - "я работаю питон разработчиком" → intent=profile_update, requires_web_search=false, requires_browser=false, topic="programming", keywords=["python", "developer"]
 - "прочитай последние 10 писем в яндекс почте и удали спам" → intent=browser_task, requires_web_search=false, requires_browser=true, browser_goal="прочитай последние 10 писем в яндекс почте и удали спам"
 - "зайди на hh.ru и откликнись на 3 вакансии" → intent=browser_task, requires_web_search=false, requires_browser=true
+- pending task says browser_task is waiting for the next manual step, user says "готово" or "продолжай" → continue the same browser_task, requires_browser=true, browser_goal should stay tied to the pending task instead of starting a new chat
 - saved profile says location=Алматы, user says "погода в моем городе" → intent=search, requires_web_search=true, requires_browser=false, required_context=["location"], missing_context=[], search_query="погода сейчас в Алматы"
 - no saved location, user says "погода в моем городе" → intent=search, requires_web_search=false, requires_browser=false, required_context=["location"], missing_context=["location"], clarification_question="В каком городе посмотреть погоду?"
-- "привет, как дела?" → intent=chat, requires_web_search=false, requires_browser=false""",
-        ),
+- "привет, как дела?" → intent=chat, requires_web_search=false, requires_browser=false"""
+
+
+INTENT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", INTENT_SYSTEM_PROMPT),
         ("human", "Saved user profile: {profile_context}"),
+        ("human", "Recent conversation history:\n{recent_history}"),
+        ("human", "Pending unresolved task: {pending_task_context}"),
         ("human", "{message_text}"),
     ]
 )
 
 # Default fallback when LLM fails
 DEFAULT_FALLBACK = TaskAnalysis(intent="chat")
+
+
+def looks_like_pending_browser_followup(message_text: str) -> bool:
+    """True when the message plausibly continues a pending browser wait (vs a brand‑new goal).
+
+    Kept permissive enough for normal sentences (OTP notes, «продолжай после лимита»); excludes
+    obvious paste‑drops (URLs, huge walls of text).
+    """
+    raw = message_text or ""
+    normalized = " ".join(raw.split())
+    if not normalized:
+        return False
+    if "\n\n" in raw:
+        return False
+    lowered = normalized.lower()
+    if "http://" in lowered or "https://" in lowered:
+        return False
+    if len(normalized) > 220:
+        return False
+    if len(normalized.split()) > 28:
+        return False
+    return True
+
+
+def _looks_like_pending_followup(message_text: str) -> bool:
+    """Backward-compatible alias within this module."""
+    return looks_like_pending_browser_followup(message_text)
+
+
+def _fallback_task_analysis(message_text: str) -> TaskAnalysis:
+    """Best-effort deterministic fallback when structured output fails."""
+    normalized = " ".join((message_text or "").lower().split())
+
+    if any(token in normalized for token in ("напомни", "напомнить", "remind")):
+        return TaskAnalysis(
+            intent="reminder",
+            user_goal=message_text,
+            routing_reason="Fallback reminder heuristic matched reminder wording.",
+        )
+
+    browser_markers = (
+        "hh",
+        "hh.ru",
+        "отклик",
+        "ваканс",
+        "зайди",
+        "зайти",
+        "в браузере",
+        "войди",
+        "логин",
+        "закажи",
+        "оформи",
+        "купи",
+    )
+    if any(token in normalized for token in browser_markers):
+        return TaskAnalysis(
+            intent="browser_task",
+            browser_goal=message_text,
+            user_goal=message_text,
+            requires_browser=True,
+            routing_reason="Fallback browser heuristic matched site/action wording.",
+        )
+
+    search_markers = ("найди", "поиск", "погода", "новости", "что такое", "сколько", "где", "когда")
+    if any(token in normalized for token in search_markers):
+        return TaskAnalysis(
+            intent="search",
+            search_query=message_text,
+            user_goal=message_text,
+            requires_web_search=True,
+            routing_reason="Fallback search heuristic matched information-seeking wording.",
+        )
+
+    return DEFAULT_FALLBACK
+
+
+def _should_relax_browser_missing_context(
+    message_text: str,
+    browser_goal: str,
+    missing_context: list[str],
+) -> bool:
+    """Return True when a browser task can start even without preselected links/items.
+
+    Typical case: user explicitly asks the assistant to open the site and search for
+    vacancies/items itself, so the browser agent should gather candidates first
+    instead of demanding links up front.
+    """
+    if not missing_context:
+        return False
+
+    normalized = " ".join(f"{message_text} {browser_goal}".lower().split())
+    search_markers = (
+        "поищи",
+        "найди",
+        "поиск",
+        "search",
+        "find",
+        "headhunter",
+        "hh",
+        "hh.ru",
+        "ваканс",
+    )
+    relaxed_keys = {"vacancy_links", "vacancy_link", "links", "item_links", "result_links"}
+    return any(marker in normalized for marker in search_markers) and set(missing_context).issubset(
+        relaxed_keys
+    )
 
 
 def parse_input_node(state: AgentState) -> dict:
@@ -70,29 +188,99 @@ def parse_input_node(state: AgentState) -> dict:
     Returns:
         Dictionary with intent, entities, and extracted fields.
     """
+    pending_task = state.pending_task or {}
+    if (
+        pending_task.get("intent") == "browser_task"
+        and pending_task.get("requires_browser")
+        and pending_task.get("awaiting_user_step")
+        and pending_task.get("blocker_type", "other") != "other"
+        and looks_like_pending_browser_followup(state.message_text)
+    ):
+        canonical = derive_canonical_objective_from_pending(pending_task) or state.message_text
+        blocker_type = pending_task.get("blocker_type", "") or "other"
+        browser_final_url = pending_task.get("browser_final_url", "") or ""
+        operational_goal = build_operational_browser_goal(
+            canonical_objective=canonical,
+            latest_user_message=state.message_text,
+            resume_url=browser_final_url,
+        )
+        goal_display = truncate_display_title(canonical)
+        logger.info(
+            "browser_pending_task_resumed",
+            user_id=state.user_id,
+            blocker_type=blocker_type,
+            browser_final_url=browser_final_url,
+            canonical_objective=preview_for_log(canonical, limit=500),
+            reply_text=preview_for_log(state.message_text, limit=200),
+        )
+        persisted_si = str(pending_task.get("browser_sub_intent") or "").strip()
+        resumed_sub_intent = persisted_si or infer_browser_sub_intent(canonical).value
+        return {
+            "intent": "browser_task",
+            "requires_web_search": False,
+            "requires_browser": True,
+            "routing_reason": "Resuming a pending browser task after the user completed a manual browser step.",
+            "user_goal": canonical,
+            "required_context": [],
+            "missing_context": [],
+            "clarification_question": "",
+            "ambiguous_request": False,
+            "canonical_user_objective": canonical,
+            "browser_goal_display": goal_display,
+            "browser_goal": operational_goal,
+            "browser_sub_intent": resumed_sub_intent,
+            "entities": {
+                "browser_goal": operational_goal,
+                "user_goal": canonical,
+                "canonical_user_objective": canonical,
+                "browser_goal_display": goal_display,
+                "requires_web_search": False,
+                "requires_browser": True,
+                "routing_reason": "Resuming a pending browser task after the user completed a manual browser step.",
+                "required_context": [],
+                "missing_context": [],
+                "clarification_question": "",
+                "ambiguous_request": False,
+                "browser_sub_intent": resumed_sub_intent,
+            },
+        }
+
     profile_context = json.dumps(
         state.user_profile.get("context_summary", {}) or {},
         ensure_ascii=False,
     )
-    llm = create_llm(temperature=0.0)
+    recent_history = json.dumps(
+        state.conversation_history[-10:] if state.conversation_history else [],
+        ensure_ascii=False,
+    )
+    pending_task_context = json.dumps(pending_task, ensure_ascii=False)
+    llm = create_llm(model=settings.INTENT_MODEL or None, temperature=0.0)
     structured_llm = llm.with_structured_output(TaskAnalysis)
     chain = INTENT_PROMPT | structured_llm
+    llm_input = {
+        "message_text": state.message_text,
+        "profile_context": profile_context[:2000],
+        "recent_history": recent_history[:3000],
+        "pending_task_context": pending_task_context[:2000],
+    }
 
-    logger.debug("classifying_intent", user_id=state.user_id, message_preview=state.message_text[:100])
-
-    result = safe_invoke(
-        chain,
-        {
-            "message_text": state.message_text,
-            "profile_context": profile_context[:2000],
-        },
-        fallback=None,
+    logger.info(
+        "task_analysis_request",
+        user_id=state.user_id,
+        model=settings.INTENT_MODEL or settings.DEFAULT_MODEL,
+        message_text=preview_for_log(state.message_text, limit=300),
+        recent_history=preview_for_log(
+            state.conversation_history[-10:] if state.conversation_history else [], limit=1200
+        ),
+        pending_task=state.pending_task or {},
     )
+
+    result = safe_invoke(chain, llm_input, fallback=None)
 
     # Handle fallback (LLM failed or returned None)
     if result is None:
         logger.warning("llm_failed_using_fallback", user_id=state.user_id)
-        result = DEFAULT_FALLBACK
+        result = _fallback_task_analysis(state.message_text)
 
     # safe_invoke may return a dict (from fallback) or a Pydantic model
     # Normalize to dict
@@ -106,7 +294,14 @@ def parse_input_node(state: AgentState) -> dict:
 
     # Validate intent
     valid_intents = {"reminder", "search", "chat", "profile_update", "browser_task"}
-    intent = result_dict.get("intent", "chat")
+    intent = str(result_dict.get("intent", "chat") or "chat").strip()
+    intent_aliases = {
+        "browsertask": "browser_task",
+        "browser task": "browser_task",
+        "profileupdate": "profile_update",
+        "profile update": "profile_update",
+    }
+    intent = intent_aliases.get(intent.lower(), intent)
     if intent not in valid_intents:
         logger.warning(
             "invalid_intent_from_llm",
@@ -118,6 +313,36 @@ def parse_input_node(state: AgentState) -> dict:
         result_dict["intent"] = intent
 
     analysis = TaskAnalysis.model_validate(result_dict)
+    if (
+        analysis.intent == "browser_task"
+        and analysis.requires_browser
+        and _should_relax_browser_missing_context(
+            state.message_text,
+            analysis.browser_goal or "",
+            analysis.missing_context,
+        )
+    ):
+        logger.info(
+            "browser_missing_context_relaxed",
+            user_id=state.user_id,
+            model=settings.INTENT_MODEL or settings.DEFAULT_MODEL,
+            original_missing_context=analysis.missing_context,
+            original_clarification_question=analysis.clarification_question,
+        )
+        analysis.required_context = [
+            item
+            for item in analysis.required_context
+            if item not in {"vacancy_links", "vacancy_link", "links"}
+        ]
+        analysis.missing_context = []
+        analysis.clarification_question = ""
+
+    logger.info(
+        "task_analysis_result",
+        user_id=state.user_id,
+        model=settings.INTENT_MODEL or settings.DEFAULT_MODEL,
+        analysis=analysis.model_dump(),
+    )
 
     output: dict = {
         "intent": intent,
@@ -128,6 +353,7 @@ def parse_input_node(state: AgentState) -> dict:
         "required_context": analysis.required_context,
         "missing_context": analysis.missing_context,
         "clarification_question": analysis.clarification_question,
+        "ambiguous_request": False,
         "entities": {
             "title": analysis.title,
             "remind_at": analysis.remind_at,
@@ -136,6 +362,8 @@ def parse_input_node(state: AgentState) -> dict:
             "topic": analysis.topic,
             "keywords": analysis.keywords,
             "browser_goal": analysis.browser_goal,
+            "canonical_user_objective": "",
+            "browser_goal_display": "",
             "user_goal": analysis.user_goal or state.message_text,
             "requires_web_search": analysis.requires_web_search,
             "requires_browser": analysis.requires_browser,
@@ -143,6 +371,7 @@ def parse_input_node(state: AgentState) -> dict:
             "required_context": analysis.required_context,
             "missing_context": analysis.missing_context,
             "clarification_question": analysis.clarification_question,
+            "ambiguous_request": False,
         },
     }
 
@@ -154,7 +383,23 @@ def parse_input_node(state: AgentState) -> dict:
     elif intent == "search":
         output["search_query"] = analysis.search_query
     elif intent == "browser_task":
-        output["browser_goal"] = analysis.browser_goal or state.message_text
+        canon = (
+            (analysis.user_goal or "").strip()
+            or (analysis.browser_goal or "").strip()
+            or state.message_text.strip()
+        )
+        output["user_goal"] = canon
+        output["canonical_user_objective"] = canon
+        output["browser_goal_display"] = truncate_display_title(canon)
+        output["browser_goal"] = build_operational_browser_goal(
+            canonical_objective=canon,
+            latest_user_message=state.message_text,
+            resume_url="",
+        )
+        output["entities"]["user_goal"] = canon
+        output["entities"]["browser_goal"] = output["browser_goal"]
+        output["entities"]["canonical_user_objective"] = canon
+        output["entities"]["browser_goal_display"] = output["browser_goal_display"]
     elif intent == "profile_update":
         output["profile_updates"] = {
             "topic": analysis.topic,
@@ -165,7 +410,46 @@ def parse_input_node(state: AgentState) -> dict:
         output["search_query"] = analysis.search_query or state.message_text
 
     if output["requires_browser"] and not output.get("browser_goal"):
-        output["browser_goal"] = analysis.browser_goal or state.message_text
+        canon_fb = (
+            (analysis.user_goal or "").strip()
+            or (analysis.browser_goal or "").strip()
+            or state.message_text.strip()
+        )
+        output["user_goal"] = output.get("user_goal") or canon_fb
+        output["canonical_user_objective"] = output.get("canonical_user_objective") or canon_fb
+        output["browser_goal_display"] = output.get("browser_goal_display") or truncate_display_title(
+            canon_fb
+        )
+        output["browser_goal"] = build_operational_browser_goal(
+            canonical_objective=output["canonical_user_objective"],
+            latest_user_message=state.message_text,
+            resume_url="",
+        )
+        output["entities"]["user_goal"] = output["user_goal"]
+        output["entities"]["browser_goal"] = output["browser_goal"]
+        output["entities"]["canonical_user_objective"] = output["canonical_user_objective"]
+        output["entities"]["browser_goal_display"] = output["browser_goal_display"]
+
+    if intent == "browser_task":
+        output["requires_browser"] = True
+        output["entities"]["requires_browser"] = True
+
+    if (
+        analysis.clarification_question.strip()
+        and not output["missing_context"]
+        and output["requires_web_search"]
+        and not output["requires_browser"]
+    ):
+        output["ambiguous_request"] = True
+        output["entities"]["ambiguous_request"] = True
+
+    if output["requires_browser"] and output.get("browser_goal"):
+        output["browser_sub_intent"] = infer_browser_sub_intent(
+            output.get("canonical_user_objective") or output["browser_goal"]
+        ).value
+    else:
+        output["browser_sub_intent"] = ""
+    output["entities"]["browser_sub_intent"] = output["browser_sub_intent"]
 
     logger.info(
         "intent_classified",
@@ -174,6 +458,7 @@ def parse_input_node(state: AgentState) -> dict:
         requires_web_search=output["requires_web_search"],
         requires_browser=output["requires_browser"],
         missing_context=output["missing_context"],
+        ambiguous_request=output["ambiguous_request"],
     )
 
     return output

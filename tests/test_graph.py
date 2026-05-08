@@ -1,6 +1,5 @@
 """Tests for LangGraph graph compilation and routing."""
 
-import pytest
 
 from src.thirdhand.agent.graph import build_graph, graph
 from src.thirdhand.agent.nodes.router import router_node
@@ -26,6 +25,7 @@ class TestGraphCompilation:
         assert "save_reminder" in node_names
         assert "execute_search" in node_names
         assert "filter_results" in node_names
+        assert "synthesize_search_response" in node_names
         assert "run_browser_task" in node_names
         assert "update_profile" in node_names
         assert "generate_response" in node_names
@@ -72,6 +72,16 @@ class TestRouterNode:
 
 class TestGraphRouting:
     """Tests for graph routing logic."""
+
+    def test_stage22_browser_path_is_flat_single_service_node(self) -> None:
+        """Stage 22: no nested browser subgraph; one node then response (service owns the loop)."""
+        compiled = build_graph()
+        assert list(compiled.get_subgraphs()) == []
+        gx = compiled.get_graph()
+        browser_edges = [e for e in gx.edges if e.source == "run_browser_task"]
+        assert len(browser_edges) == 1
+        assert browser_edges[0].target == "generate_response"
+        assert browser_edges[0].conditional is False
 
     def test_conditional_edges_mapping(self) -> None:
         """Test that conditional edges map correctly."""

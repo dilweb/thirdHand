@@ -9,8 +9,11 @@ from .search_digest import SearchDigest
 from .database import (
     engine,
     async_session_factory,
+    sync_engine,
+    sync_session_factory,
     get_async_session,
     get_session,
+    get_sync_session,
     init_db,
     close_db,
 )
@@ -32,8 +35,11 @@ __all__ = [
     "SearchDigest",
     "engine",
     "async_session_factory",
+    "sync_engine",
+    "sync_session_factory",
     "get_async_session",
     "get_session",
+    "get_sync_session",
     "init_db",
     "close_db",
     "UserQueries",

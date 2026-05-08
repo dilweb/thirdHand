@@ -1,8 +1,12 @@
 """Tests for search flow nodes."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from src.thirdhand.agent.nodes.search import execute_search_node, filter_results_node
+from src.thirdhand.agent.nodes.search import (
+    execute_search_node,
+    filter_results_node,
+    synthesize_search_response_node,
+)
 from src.thirdhand.agent.state import AgentState
 
 
@@ -41,7 +45,11 @@ class TestExecuteSearchNode:
             mock_search.return_value = {
                 "answer": "",
                 "results": [
-                    {"title": "Python result", "url": "https://example.com/python", "snippet": "Snippet"}
+                    {
+                        "title": "Python result",
+                        "url": "https://example.com/python",
+                        "snippet": "Snippet",
+                    }
                 ],
             }
             result = execute_search_node(state)
@@ -115,9 +123,9 @@ class TestFilterResultsNode:
         result = filter_results_node(state)
 
         assert result["response_type"] == "search_results"
-        assert "Вот что нашёл" in result["response_text"]
-        assert "GPT-5" in result["response_text"]
-        assert "Gemini" in result["response_text"]
+        assert "search_evidence" in result
+        assert len(result["search_evidence"]) == 2
+        assert result["search_evidence"][0]["title"] == "OpenAI GPT-5 Released"
 
     def test_filter_empty_results(self) -> None:
         """Test handling of empty search results."""
@@ -147,9 +155,8 @@ class TestFilterResultsNode:
 
         result = filter_results_node(state)
 
-        assert "Коротко" in result["response_text"]
-        assert "Алматы" in result["response_text"]
-        assert "Источники" in result["response_text"]
+        assert result["search_answer"] == "В Алматы сейчас +18°C, ясно."
+        assert len(result["search_evidence"]) == 1
 
     def test_filter_preserves_upstream_error(self) -> None:
         """Upstream search errors should not be overwritten by empty-results text."""
@@ -170,19 +177,21 @@ class TestFilterResultsNode:
         state = AgentState(
             user_id=123,
             search_results=[
-                {"title": f"Result {i}", "url": f"https://example.com/{i}", "snippet": f"Snippet {i}"}
+                {
+                    "title": f"Result {i}",
+                    "url": f"https://example.com/{i}",
+                    "snippet": f"Snippet {i}",
+                }
                 for i in range(10)
             ],
         )
 
         result = filter_results_node(state)
 
-        # Results are 0-indexed, so we get Result 0-4 (5 items)
-        text = result["response_text"]
-        assert "Result 0" in text
-        assert "Result 4" in text
-        # Result 5 should not be in the text since we limit to 5
-        assert "Result 5" not in text
+        titles = [item["title"] for item in result["search_evidence"]]
+        assert "Result 0" in titles
+        assert "Result 3" in titles
+        assert "Result 4" not in titles
 
     def test_filter_escapes_html_in_snippet_and_title(self) -> None:
         """External titles/snippets must not inject Telegram/HTML markup."""
@@ -190,7 +199,7 @@ class TestFilterResultsNode:
             user_id=123,
             search_results=[
                 {
-                    "title": '<b>fake</b>',
+                    "title": "<b>fake</b>",
                     "url": "https://example.com/?q=a&b=1",
                     "snippet": "Line with <tag> & ampersand",
                 }
@@ -199,9 +208,67 @@ class TestFilterResultsNode:
 
         result = filter_results_node(state)
 
-        text = result["response_text"]
-        assert "<b>fake</b>" not in text
-        assert "&lt;b&gt;fake&lt;/b&gt;" in text
-        assert "&lt;tag&gt;" in text
-        assert "&amp;" in text
-        assert 'href="https://example.com/?q=a&amp;b=1"' in text
+        assert result["search_evidence"][0]["title"] == "<b>fake</b>"
+        assert "<tag>" in result["search_evidence"][0]["snippet"]
+
+
+class TestSynthesizeSearchResponseNode:
+    def test_synthesize_search_response_passes_error(self) -> None:
+        state = AgentState(
+            response_type="error",
+            response_text="⚠️ Ошибка поиска",
+        )
+
+        result = synthesize_search_response_node(state)
+
+        assert result["response_text"] == "⚠️ Ошибка поиска"
+
+    def test_synthesize_search_response_uses_existing_text(self) -> None:
+        state = AgentState(
+            response_type="search_results",
+            response_text="🔍 Уже готовый ответ",
+        )
+
+        result = synthesize_search_response_node(state)
+
+        assert result["response_text"] == "🔍 Уже готовый ответ"
+
+    def test_synthesize_search_response_fallback(self) -> None:
+        """When chain.invoke fails, fall back to HTML summary from answer_hint + evidence."""
+        state = AgentState(
+            user_id=123,
+            message_text="сколько стоит m273 в казахстане?",
+            search_answer="Диапазон цен от 125 507 ₸ до 1 200 000 ₸.",
+            search_evidence=[
+                {
+                    "title": "Kolesa",
+                    "url": "https://example.com/kolesa",
+                    "snippet": "M273 за 1 200 000 ₸ в Алматы",
+                }
+            ],
+        )
+
+        bad_chain = MagicMock()
+        bad_chain.invoke.side_effect = RuntimeError("llm unavailable")
+        mock_prompt = MagicMock()
+        mock_prompt.__or__ = MagicMock(return_value=bad_chain)
+
+        with patch(
+            "src.thirdhand.agent.nodes.search.ChatPromptTemplate.from_messages",
+            return_value=mock_prompt,
+        ):
+            result = synthesize_search_response_node(state)
+
+        assert "Коротко" in result["response_text"]
+        assert "125 507" in result["response_text"]
+        assert "Kolesa" in result["response_text"]
+
+    def test_synthesize_search_response_empty_evidence(self) -> None:
+        state = AgentState(
+            user_id=123,
+            search_evidence=[],
+        )
+
+        result = synthesize_search_response_node(state)
+
+        assert "Ничего не найдено" in result["response_text"]

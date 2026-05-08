@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from aiogram.types import Message, User
+from aiogram.types import Message
 
 from src.thirdhand.bot.middlewares.db_session import DbSessionMiddleware
 from src.thirdhand.bot.middlewares.user_sync import UserSyncMiddleware

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -54,9 +54,7 @@ class Interest(Base, TimestampMixin):
     )
 
     # Constraints
-    __table_args__ = (
-        UniqueConstraint("user_id", "topic", name="uq_user_topic"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "topic", name="uq_user_topic"),)
 
     def __repr__(self) -> str:
         return (

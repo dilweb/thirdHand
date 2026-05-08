@@ -6,6 +6,7 @@ import structlog
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
+from src.thirdhand.config import settings
 from src.thirdhand.services.llm import create_llm, safe_invoke
 
 logger = structlog.get_logger(__name__)
@@ -88,7 +89,7 @@ async def extract_bio_facts(
     Returns:
         Extracted facts, or None if extraction failed.
     """
-    llm = create_llm(temperature=0.0)
+    llm = create_llm(model=settings.PROFILE_MODEL or settings.INTENT_MODEL or None, temperature=0.0)
     structured_llm = llm.with_structured_output(BioFacts)
     chain = BIO_EXTRACTION_PROMPT | structured_llm
 
@@ -159,8 +160,7 @@ def merge_facts(
     # Merge interests (union with priority tracking)
     if new_facts.interests:
         existing_interests = {
-            i["topic"] if isinstance(i, dict) else i
-            for i in profile.get("interests", [])
+            i["topic"] if isinstance(i, dict) else i for i in profile.get("interests", [])
         }
         for interest in new_facts.interests:
             if interest not in existing_interests:

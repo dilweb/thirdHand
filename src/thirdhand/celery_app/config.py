@@ -2,7 +2,6 @@
 
 from celery.schedules import crontab
 
-from src.thirdhand.config import settings
 
 # Beat schedule
 CELERY_BEAT_SCHEDULE = {

@@ -1,7 +1,6 @@
 """Structlog configuration for structured logging."""
 
 import logging
-import sys
 
 import structlog
 
@@ -12,12 +11,9 @@ def setup_logging(level: str = "INFO") -> None:
     Args:
         level: Logging level (DEBUG, INFO, WARNING, ERROR).
     """
-    # Standard logging config for non-structlog libraries
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stdout,
-        level=logging.WARNING,
-    )
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+    root_logger.setLevel(logging.WARNING)
 
     structlog.configure(
         processors=[
@@ -28,9 +24,7 @@ def setup_logging(level: str = "INFO") -> None:
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.dev.ConsoleRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            logging.getLevelName(level)
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(logging.getLevelName(level)),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=False,

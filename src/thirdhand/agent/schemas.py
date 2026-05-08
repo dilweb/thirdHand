@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -17,8 +19,12 @@ class TaskAnalysis(BaseModel):
     search_query: str = Field(default="", description="Search query")
     topic: str = Field(default="", description="Topic for interests")
     keywords: list[str] = Field(default_factory=list, description="Keywords for interests")
-    browser_goal: str = Field(default="", description="Browser automation goal in the user's own words")
-    user_goal: str = Field(default="", description="Short normalized description of the user's actual goal.")
+    browser_goal: str = Field(
+        default="", description="Browser automation goal in the user's own words"
+    )
+    user_goal: str = Field(
+        default="", description="Short normalized description of the user's actual goal."
+    )
     requires_web_search: bool = Field(
         default=False,
         description="True when the assistant needs fresh information from the open web to answer well.",
@@ -56,6 +62,7 @@ class ContextResolutionResult(BaseModel):
     requires_browser: bool | None = None
     response_text: str = ""
     response_type: str = "text"
+    ambiguous_request: bool | None = None
 
 
 class SearchResult(BaseModel):
@@ -81,3 +88,53 @@ class SearchExecutionResult(BaseModel):
     search_query: str = ""
     response_text: str = ""
     response_type: str = "search_results"
+
+
+class SearchEvidenceItem(BaseModel):
+    """Compact search evidence kept for final synthesis."""
+
+    title: str = "Без названия"
+    url: str = ""
+    snippet: str = ""
+
+
+class SearchEvidencePack(BaseModel):
+    """Selected evidence passed into final search answer synthesis."""
+
+    search_query: str = ""
+    answer_hint: str = ""
+    evidence: list[SearchEvidenceItem] = Field(default_factory=list)
+
+
+class PendingTask(BaseModel):
+    """Persisted unresolved task awaiting more user input."""
+
+    task_id: str = ""
+    created_at: str = ""
+    intent: str = "chat"
+    user_goal: str = ""
+    original_user_request: str = ""
+    search_query: str = ""
+    browser_goal: str = ""
+    canonical_user_objective: str = Field(
+        default="",
+        description="Stable user intent for this browser task; survives resume without concatenated runtime text.",
+    )
+    requires_web_search: bool = False
+    requires_browser: bool = False
+    routing_reason: str = ""
+    required_context: list[str] = Field(default_factory=list)
+    missing_context: list[str] = Field(default_factory=list)
+    clarification_question: str = ""
+    ambiguous_request: bool = False
+    blocker_type: str = ""
+    browser_final_url: str = ""
+    awaiting_user_step: bool = False
+    browser_debug_note: str = ""
+    browser_auth_facts: dict[str, Any] = Field(default_factory=dict)
+    browser_barrier_kind: str = ""
+    browser_barrier_facts: dict[str, Any] = Field(default_factory=dict)
+    browser_next_user_action: str = ""
+    browser_resume_strategy: str = ""
+    browser_sub_intent: str = ""
+    browser_stop_reason: str = ""

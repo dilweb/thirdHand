@@ -26,6 +26,7 @@ class AgentState:
     required_context: list[str] = field(default_factory=list)
     missing_context: list[str] = field(default_factory=list)
     clarification_question: str = ""
+    ambiguous_request: bool = False
 
     # === Reminder flow ===
     reminder_id: int | None = None
@@ -37,15 +38,34 @@ class AgentState:
     search_query: str = ""
     search_results: list[dict[str, Any]] = field(default_factory=list)
     search_answer: str = ""
+    search_evidence: list[dict[str, Any]] = field(default_factory=list)
 
     # === Profile flow ===
     profile_updates: dict[str, Any] = field(default_factory=dict)
 
     # === Browser automation flow ===
     browser_goal: str = ""
+    # Short title for user-visible summaries; full browser_goal may be a structured LLM bundle.
+    browser_goal_display: str = ""
+    # Stable high-level intent (Redis / resume); not concatenated with continuation slabs.
+    canonical_user_objective: str = ""
     browser_trace: list[str] = field(default_factory=list)
     browser_final_url: str = ""
     browser_needs_user_input: bool = False
+    browser_blocker_type: str = ""
+    browser_debug_note: str = ""
+    browser_auth_facts: dict[str, Any] = field(default_factory=dict)
+    browser_barrier_kind: str = ""
+    browser_barrier_facts: dict[str, Any] = field(default_factory=dict)
+    browser_next_user_action: str = ""
+    browser_resume_strategy: str = ""
+    browser_sub_intent: str = ""
+
+    # Optional: viewport screenshot (e.g. captcha) as raw base64 PNG for Telegram.
+    browser_screenshot_png_base64: str = ""
+
+    # Machine-readable exit hint when the browser run needs the user (captcha, stall, step limit).
+    browser_stop_reason: str = ""
 
     # === Output (to bot handler) ===
     response_text: str = ""
@@ -54,3 +74,6 @@ class AgentState:
     # === Context ===
     conversation_history: list[dict[str, str]] = field(default_factory=list)
     user_profile: dict[str, Any] = field(default_factory=dict)
+    pending_task: dict[str, Any] = field(default_factory=dict)
+    db_session: Any = None
+    status_callback: Any = None

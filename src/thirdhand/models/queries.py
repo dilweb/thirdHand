@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import Session
 
 from .interest import Interest
 from .profile import UserProfile
@@ -133,9 +134,39 @@ class ReminderQueries:
         celery_task_id: str | None = None,
     ) -> None:
         """Mark reminder as sent."""
-        result = await session.execute(
-            select(Reminder).where(Reminder.id == reminder_id)
-        )
+        result = await session.execute(select(Reminder).where(Reminder.id == reminder_id))
+        reminder = result.scalar_one_or_none()
+        if reminder:
+            reminder.status = ReminderStatus.SENT
+            if celery_task_id:
+                reminder.celery_task_id = celery_task_id
+
+    @staticmethod
+    async def get_by_id(
+        session: AsyncSession,
+        reminder_id: int,
+    ) -> Reminder | None:
+        """Fetch one reminder by ID."""
+        result = await session.execute(select(Reminder).where(Reminder.id == reminder_id))
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def get_by_id_sync(
+        session: Session,
+        reminder_id: int,
+    ) -> Reminder | None:
+        """Fetch one reminder by ID using a sync session."""
+        result = session.execute(select(Reminder).where(Reminder.id == reminder_id))
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def mark_as_sent_sync(
+        session: Session,
+        reminder_id: int,
+        celery_task_id: str | None = None,
+    ) -> None:
+        """Mark reminder as sent using a sync session."""
+        result = session.execute(select(Reminder).where(Reminder.id == reminder_id))
         reminder = result.scalar_one_or_none()
         if reminder:
             reminder.status = ReminderStatus.SENT
@@ -186,9 +217,7 @@ class InterestQueries:
     ) -> list[Interest]:
         """Get all interests for a user."""
         result = await session.execute(
-            select(Interest)
-            .where(Interest.user_id == user_id)
-            .order_by(Interest.priority.desc())
+            select(Interest).where(Interest.user_id == user_id).order_by(Interest.priority.desc())
         )
         return list(result.scalars().all())
 
@@ -198,9 +227,7 @@ class InterestQueries:
     ) -> list[Interest]:
         """Get all active interests across all users."""
         result = await session.execute(
-            select(Interest)
-            .options(selectinload(Interest.user))
-            .order_by(Interest.priority.desc())
+            select(Interest).options(selectinload(Interest.user)).order_by(Interest.priority.desc())
         )
         return list(result.scalars().all())
 
@@ -217,18 +244,14 @@ class UserProfileQueries:
 
         Also ensures the User record exists (creates it if missing).
         """
-        result = await session.execute(
-            select(UserProfile).where(UserProfile.user_id == user_id)
-        )
+        result = await session.execute(select(UserProfile).where(UserProfile.user_id == user_id))
         profile = result.scalar_one_or_none()
 
         if profile:
             return profile
 
         # Ensure User record exists to satisfy FK constraint
-        user_result = await session.execute(
-            select(User).where(User.id == user_id)
-        )
+        user_result = await session.execute(select(User).where(User.id == user_id))
         user = user_result.scalar_one_or_none()
 
         if user is None:

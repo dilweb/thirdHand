@@ -33,6 +33,9 @@ services:
     build: .
     container_name: thirdhand-bot
     command: python -m src.thirdhand.bot.main
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     env_file:
       - .env
     environment:
@@ -41,17 +44,24 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - BROWSER_PROFILE_DIR=/browser-profile
+      - BROWSER_HEADLESS=true
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - browser_profile_data:/browser-profile
     restart: unless-stopped
 
   worker:
     build: .
     container_name: thirdhand-worker
     command: celery -A src.thirdhand.celery_app worker --loglevel=info
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     env_file:
       - .env
     environment:
@@ -60,17 +70,24 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - BROWSER_PROFILE_DIR=/browser-profile
+      - BROWSER_HEADLESS=true
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - browser_profile_data:/browser-profile
     restart: unless-stopped
 
   beat:
     build: .
     container_name: thirdhand-beat
     command: celery -A src.thirdhand.celery_app beat --loglevel=info
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     env_file:
       - .env
     environment:
@@ -79,13 +96,17 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/1
       - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - BROWSER_PROFILE_DIR=/browser-profile
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      - browser_profile_data:/browser-profile
     restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
+  browser_profile_data:

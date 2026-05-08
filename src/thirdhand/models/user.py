@@ -1,9 +1,8 @@
 """User model for storing Telegram user information."""
 
-from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, String, func
+from sqlalchemy import BigInteger, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin
@@ -61,7 +60,4 @@ class User(Base, TimestampMixin):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"<User(id={self.id}, username={self.username!r}, "
-            f"first_name={self.first_name!r})>"
-        )
+        return f"<User(id={self.id}, username={self.username!r}, first_name={self.first_name!r})>"

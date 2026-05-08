@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -11,6 +10,7 @@ import structlog
 
 from src.thirdhand.agent.schemas import SearchProviderResponse, SearchResult
 from src.thirdhand.config import settings
+from src.thirdhand.services.llm import preview_for_log
 
 logger = structlog.get_logger(__name__)
 
@@ -47,6 +47,12 @@ def search_web(query: str, include_answer: bool = False) -> SearchProviderRespon
             "Authorization": f"Bearer {api_key}",
         },
         method="POST",
+    )
+    logger.info(
+        "web_search_request",
+        query=preview_for_log(query, limit=300),
+        include_answer=include_answer,
+        max_results=settings.SEARCH_MAX_RESULTS,
     )
 
     try:

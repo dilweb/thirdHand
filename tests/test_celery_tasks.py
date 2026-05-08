@@ -2,7 +2,6 @@
 
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from src.thirdhand.celery_app.tasks import (
     send_reminder_notification,

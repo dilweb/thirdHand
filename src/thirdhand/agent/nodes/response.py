@@ -4,21 +4,16 @@ import structlog
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 from src.thirdhand.agent.state import AgentState
-from src.thirdhand.services.llm import create_llm
+from src.thirdhand.config import settings
+from src.thirdhand.services.llm import create_llm, preview_for_log
 from src.thirdhand.services.telegram_format import format_agent_reply_for_telegram
 
 logger = structlog.get_logger(__name__)
 
-BASE_SYSTEM_PROMPT = """Ты — thirdHand, персональный AI-ассистент в Telegram.
-Твоя задача — помогать с рутиной, напоминаниями и поиском информации.
-Отвечай кратко и по делу. Используй эмодзи для наглядности.
-
-Форматирование: используй HTML-теги для выделения текста:
-- <b>жирный</b> для заголовков и ключевых слов
-- <i>курсив</i> для пояснений
-- <code>код</code> для команд и технических терминов
-- <a href="URL">текст</a> для ссылок
-Не используй Markdown (**, __, ```)."""
+BASE_SYSTEM_PROMPT = """You are ThirdHand, a personal AI assistant in Telegram.
+Your job is to provide routine tasks, reminders, and information search.
+My answers are brief and to the point. I use emojis for clarity, but rarely.
+Write in plain text, no HTML or Markdown."""
 
 
 def generate_response_node(state: AgentState) -> dict:
@@ -56,11 +51,19 @@ def generate_response_node(state: AgentState) -> dict:
     )
 
     # Generate a conversational response
-    llm = create_llm(temperature=0.7)
+    llm = create_llm(model=settings.CHAT_MODEL or None, temperature=0.7)
     chain = prompt | llm
 
     # Build conversation history
     history = state.conversation_history[-10:]  # Last 10 messages
+    logger.info(
+        "response_generation_request",
+        user_id=state.user_id,
+        model=settings.CHAT_MODEL or settings.DEFAULT_MODEL,
+        message_text=preview_for_log(state.message_text, limit=300),
+        history=preview_for_log(history, limit=1200),
+        system_prompt=preview_for_log(system_prompt, limit=1200),
+    )
 
     try:
         result = chain.invoke(
@@ -70,6 +73,12 @@ def generate_response_node(state: AgentState) -> dict:
             }
         )
         raw = result.content if hasattr(result, "content") else str(result)
+        logger.info(
+            "response_generation_result",
+            user_id=state.user_id,
+            model=settings.CHAT_MODEL or settings.DEFAULT_MODEL,
+            raw_response=preview_for_log(raw, limit=1200),
+        )
         response_text = format_agent_reply_for_telegram(raw)
     except Exception as e:
         logger.error("response_generation_failed", error=str(e))

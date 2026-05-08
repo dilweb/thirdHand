@@ -196,7 +196,6 @@ def compress_if_needed(
     Returns:
         (profile, session_summaries, history) — possibly compressed.
     """
-    max_tokens = settings.MAX_CONTEXT_TOKENS
     max_sessions = settings.MAX_SESSION_SUMMARIES
     max_history = settings.MAX_HISTORY_MESSAGES
 

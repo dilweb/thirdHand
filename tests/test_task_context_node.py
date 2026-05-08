@@ -39,3 +39,29 @@ class TestResolveTaskContextNode:
         result = resolve_task_context_node(state)
 
         assert result == {}
+
+    def test_browser_missing_context_does_not_skip_browser_run(self) -> None:
+        state = AgentState(
+            intent="browser_task",
+            requires_browser=False,
+            browser_goal="login to hh.ru",
+            missing_context=["password_or_code"],
+            clarification_question="Неверная фраза про «я уже ввёл»",
+        )
+
+        result = resolve_task_context_node(state)
+
+        assert result == {}
+
+    def test_blocks_ambiguous_search_before_execution(self) -> None:
+        state = AgentState(
+            requires_web_search=True,
+            ambiguous_request=True,
+            clarification_question="M273 — это модель чего?",
+            search_query="сколько стоит M273 в Казахстане",
+        )
+
+        result = resolve_task_context_node(state)
+
+        assert result["requires_web_search"] is False
+        assert result["response_text"] == "M273 — это модель чего?"

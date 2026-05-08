@@ -4,7 +4,14 @@ from typing import Any, Awaitable, Callable, Dict
 
 import structlog
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineQuery, Message, PreCheckoutQuery, TelegramObject
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineQuery,
+    Message,
+    PreCheckoutQuery,
+    TelegramObject,
+)
 
 from src.thirdhand.models import UserQueries
 
