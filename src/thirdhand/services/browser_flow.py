@@ -41,6 +41,11 @@ from src.thirdhand.services.browser_site_registry import (
     infer_site_key_from_url,
     normalize_site_name,
 )
+from src.thirdhand.services.browser_step_verification import (
+    StepOutcome,
+    build_step_expectation,
+    evaluate_step_outcome,
+)
 from src.thirdhand.services.llm import ainvoke_with_retry, create_llm, preview_for_log
 
 logger = structlog.get_logger(__name__)
@@ -1246,6 +1251,7 @@ async def _maybe_complete_via_runtime_detector(
     before_snapshot: str,
     before_page_state: BrowserPageState | None,
     before_url: str,
+    step_outcome: StepOutcome | None = None,
 ) -> BrowserRunResult | None:
     """Try to auto-complete the run when runtime can prove terminal page-state transition."""
     after_url = ""
@@ -1263,6 +1269,39 @@ async def _maybe_complete_via_runtime_detector(
         before_url=before_url,
         after_url=after_url,
     )
+    if step_outcome is not None:
+        logger.info(
+            "browser_runtime_step_outcome_considered",
+            user_id=flow.user_id,
+            step=step_number,
+            tool_name=tool_name,
+            outcome_status=step_outcome.status,
+            outcome_confidence=step_outcome.confidence,
+        )
+        if step_outcome.status == "success" and step_outcome.confidence >= _RUNTIME_SUCCESS_HIGH_CONFIDENCE:
+            inference = type(inference)(
+                completed=True,
+                confidence=max(inference.confidence, step_outcome.confidence),
+                reason_code="step_verifier_confirmed_success",
+                explanation=(
+                    "Step verifier observed a strong post-action transition consistent with success. "
+                    + step_outcome.summary
+                ),
+            )
+        elif (
+            step_outcome.status == "probable_success"
+            and step_outcome.confidence >= _RUNTIME_SUCCESS_HIGH_CONFIDENCE
+            and inference.confidence < _RUNTIME_SUCCESS_HIGH_CONFIDENCE
+        ):
+            inference = type(inference)(
+                completed=True,
+                confidence=step_outcome.confidence,
+                reason_code="step_verifier_probable_success",
+                explanation=(
+                    "Step verifier observed a likely successful transition strong enough to treat as "
+                    "runtime completion. " + step_outcome.summary
+                ),
+            )
     logger.info(
         "browser_runtime_terminal_outcome_inferred",
         user_id=flow.user_id,
@@ -1326,10 +1365,20 @@ def _runtime_detector_followup_message(
     before_page_state: BrowserPageState | None,
     before_url: str,
     verification_already_requested: bool,
+    step_outcome: StepOutcome | None = None,
 ) -> str:
     """Optional one-shot prompt nudging the model to verify a medium-confidence success state."""
     if verification_already_requested:
         return ""
+    if step_outcome is not None:
+        if step_outcome.status in {"success", "blocked"}:
+            return ""
+        if step_outcome.status in {"probable_success", "ambiguous"} and step_outcome.confidence >= 0.45:
+            return (
+                "Inspect the live page once more before taking another action. "
+                "The last step may already have changed the page meaningfully; verify whether the target state, "
+                "local action surface, or confirmation markers changed."
+            )
     inference = infer_terminal_outcome(
         sub_intent=flow.sub_intent.value,
         tool_name=tool_name,
@@ -1349,6 +1398,15 @@ def _runtime_detector_followup_message(
         confidence=inference.confidence,
         reason_code=inference.reason_code,
     )
+
+
+def _verification_trace_line(*, status: str, confidence: float, markers: list[str]) -> str:
+    payload = {
+        "status": status,
+        "confidence": round(confidence, 2),
+        "markers": markers[:6],
+    }
+    return "step_verification: " + _shorten(json.dumps(payload, ensure_ascii=False))
 
 
 async def run_browser_task_orchestration(
@@ -1874,6 +1932,51 @@ async def run_browser_task_orchestration(
             ):
                 tool_actions_taken += 1
                 await _rebuild_auth_visual_for_flow(flow, recovery_attempt=0)
+                step_outcome: StepOutcome | None = None
+                expectation = build_step_expectation(
+                    step_number=step + 1,
+                    user_objective=goal,
+                    tool_name=tool_name,
+                    tool_args=args if isinstance(args, dict) else {},
+                    before_snapshot=before_snapshot,
+                    before_page_state=before_page_state,
+                )
+                if expectation is not None:
+                    step_outcome = evaluate_step_outcome(
+                        expectation=expectation,
+                        tool_result=result,
+                        before_snapshot=before_snapshot,
+                        after_snapshot=flow.last_snapshot,
+                        before_page_state=before_page_state,
+                        after_page_state=flow.page_state,
+                        before_url=before_url,
+                        after_url=flow.current_url,
+                    )
+                    markers = list(step_outcome.evidence.success_markers) + list(
+                        step_outcome.evidence.blocker_markers or step_outcome.evidence.failure_markers
+                    )
+                    trace.append(
+                        _verification_trace_line(
+                            status=step_outcome.status,
+                            confidence=step_outcome.confidence,
+                            markers=markers,
+                        )
+                    )
+                    logger.info(
+                        "browser_step_outcome_evaluated",
+                        user_id=user_id,
+                        step=step + 1,
+                        tool_name=tool_name,
+                        outcome_status=step_outcome.status,
+                        confidence=step_outcome.confidence,
+                        success_markers=list(step_outcome.evidence.success_markers),
+                        failure_markers=list(step_outcome.evidence.failure_markers),
+                        blocker_markers=list(step_outcome.evidence.blocker_markers),
+                    )
+                    last_transition_for_runtime_detector = {
+                        **(last_transition_for_runtime_detector or {}),
+                        "step_outcome": step_outcome,
+                    }
                 runtime_result = await _maybe_complete_via_runtime_detector(
                     flow=flow,
                     session=session,
@@ -1885,6 +1988,7 @@ async def run_browser_task_orchestration(
                     before_snapshot=before_snapshot,
                     before_page_state=before_page_state,
                     before_url=before_url,
+                    step_outcome=step_outcome,
                 )
                 if runtime_result is not None:
                     return runtime_result
@@ -1910,6 +2014,7 @@ async def run_browser_task_orchestration(
                     before_page_state=before_page_state,
                     before_url=before_url,
                     verification_already_requested=runtime_verification_requested,
+                    step_outcome=step_outcome,
                 )
                 if followup:
                     messages.append(HumanMessage(content=followup))
@@ -1947,6 +2052,7 @@ async def run_browser_task_orchestration(
             before_snapshot=str(last_transition_for_runtime_detector.get("before_snapshot", "") or ""),
             before_page_state=last_transition_for_runtime_detector.get("before_page_state"),
             before_url=str(last_transition_for_runtime_detector.get("before_url", "") or ""),
+            step_outcome=last_transition_for_runtime_detector.get("step_outcome"),
         )
         if runtime_result is not None:
             return runtime_result

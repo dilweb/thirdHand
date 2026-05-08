@@ -14,6 +14,10 @@ from src.thirdhand.services.browser_flow import (
     infer_browser_sub_intent,
     sub_intent_execution_brief,
 )
+from src.thirdhand.services.browser_step_verification import (
+    StepOutcome,
+    VerificationEvidence,
+)
 
 
 def test_canonical_maps_legacy_runtime_labels() -> None:
@@ -306,6 +310,38 @@ def test_runtime_detector_followup_message_requests_one_more_inspection() -> Non
     ) == ""
 
 
+def test_runtime_detector_followup_message_uses_step_outcome_when_available() -> None:
+    from src.thirdhand.services.browser_flow import _runtime_detector_followup_message
+
+    flow = SimpleNamespace(
+        sub_intent=BrowserSubIntent.APPLY_TO_TARGETS,
+        last_snapshot='{"headings":["Jobs"]}',
+        page_state=None,
+        current_url="https://jobs.example/list",
+    )
+    msg = _runtime_detector_followup_message(
+        flow=flow,
+        tool_name="click",
+        before_snapshot='{"headings":["Jobs"]}',
+        before_page_state=None,
+        before_url="https://jobs.example/list",
+        verification_already_requested=False,
+        step_outcome=StepOutcome(
+            status="probable_success",
+            confidence=0.63,
+            summary="Local surface changed after the click.",
+            evidence=VerificationEvidence(
+                tool_succeeded=False,
+                tool_error="ERROR: TimeoutError",
+                target_changed=True,
+                primary_action_changed=True,
+                confidence=0.63,
+            ),
+        ),
+    )
+    assert "Inspect the live page once more" in msg
+
+
 @pytest.mark.asyncio
 async def test_runtime_detector_can_auto_finish_run() -> None:
     from src.thirdhand.services.browser_flow import _maybe_complete_via_runtime_detector
@@ -471,3 +507,69 @@ async def test_runtime_detector_can_convert_step_limit_exit_into_completed() -> 
     assert result.auth_facts["outcome"] == "runtime_success_detected"
     assert result.auth_facts["success_detected_by_runtime"] is True
     assert any("runtime_success_detected" in line for line in result.trace)
+
+
+@pytest.mark.asyncio
+async def test_runtime_detector_can_complete_from_step_verifier_probable_success() -> None:
+    from src.thirdhand.services.browser_flow import _maybe_complete_via_runtime_detector
+    from src.thirdhand.services.browser_page_state import derive_browser_page_state
+
+    before = derive_browser_page_state(
+        snapshot_json="""
+        {
+          "headings": ["Vacancies"],
+          "interactive": [
+            {"id": "b1", "tag": "button", "text": "Apply", "fillable": false}
+          ]
+        }
+        """,
+        probe={"auth_signals": {"login_form_present": False}},
+    )
+    after = derive_browser_page_state(
+        snapshot_json="""
+        {
+          "headings": ["Vacancies"],
+          "interactive": [
+            {"id": "b2", "tag": "button", "text": "Chat", "fillable": false}
+          ]
+        }
+        """,
+        probe={"auth_signals": {"login_form_present": False}},
+    )
+    flow = SimpleNamespace(
+        user_id=1,
+        sub_intent=BrowserSubIntent.APPLY_TO_TARGETS,
+        last_snapshot='{"headings":["Vacancies"]}',
+        page_state=after,
+        current_url="https://jobs.example/list",
+        transition=AsyncMock(),
+    )
+    session = SimpleNamespace(current_url=AsyncMock(return_value="https://jobs.example/list"))
+    result = await _maybe_complete_via_runtime_detector(
+        flow=flow,
+        session=session,
+        goal="apply to vacancy",
+        goal_display="apply",
+        trace=[],
+        step_number=3,
+        tool_name="click",
+        before_snapshot='{"headings":["Vacancies"]}',
+        before_page_state=before,
+        before_url="https://jobs.example/list",
+        step_outcome=StepOutcome(
+            status="probable_success",
+            confidence=0.81,
+            summary="Target state changed from Apply to Chat after the click.",
+            evidence=VerificationEvidence(
+                tool_succeeded=False,
+                tool_error="ERROR: TimeoutError",
+                target_changed=True,
+                primary_action_changed=True,
+                confidence=0.81,
+            ),
+        ),
+    )
+    assert result is not None
+    assert result.needs_user_input is False
+    assert result.auth_facts["outcome"] == "runtime_success_detected"
+    assert result.auth_facts["reason_code"] == "step_verifier_probable_success"
