@@ -1,14 +1,14 @@
 """LangGraph agent graph definition.
 
-Phase I / Stage 22: The browser subsystem stays **service-local** (`browser_flow.py`, tool loop,
-sub-intents). This graph exposes a single ``run_browser_task`` node that delegates to
-``run_browser_task_node`` and then always continues to ``generate_response``.
+Browser work is delegated to the browser-core service layer through one graph node:
+``run_browser_task`` -> ``generate_response``.
 
-We intentionally do **not** nest a LangGraph subgraph for browser work: the real state machine
-already lives in the browser service layer, and an extra subgraph would add indirection without
-splitting graph-level concerns. Revisit if we later need multiple first-class LangGraph nodes
-for browser (for example distinct pre-check and execution stages with different reducers).
+We intentionally keep browser automation outside a nested LangGraph subgraph. The browser core
+already owns observation, action selection, pause/resume, and execution sequencing. The graph only
+routes into browser execution and then returns to normal response handling.
 """
+
+import structlog
 
 from langgraph.graph import END, StateGraph
 
@@ -27,10 +27,19 @@ from src.thirdhand.agent.nodes import (
 )
 from src.thirdhand.agent.state import AgentState
 
+logger = structlog.get_logger(__name__)
+
 
 def route_by_intent(state: AgentState) -> str:
     """Conditional edge function that routes to the appropriate flow."""
-    return router_node(state)
+    route_target = router_node(state)
+    logger.info(
+        "graph_route_decision",
+        route_target=route_target,
+        has_messages=hasattr(state, "messages") and len(state.messages) > 0,
+        has_goal=bool(getattr(state, "goal", None) or getattr(state, "user_goal", None) or getattr(state, "browser_goal", None)),
+    )
+    return route_target
 
 
 def build_graph() -> StateGraph:
@@ -42,6 +51,8 @@ def build_graph() -> StateGraph:
     Returns:
         Compiled graph ready for invocation.
     """
+    logger.info("graph_build_started")
+    
     # Initialize graph with state
     workflow = StateGraph(AgentState)
 

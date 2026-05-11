@@ -53,10 +53,6 @@ class AgentState:
     browser_final_url: str = ""
     browser_needs_user_input: bool = False
     browser_blocker_type: str = ""
-    browser_debug_note: str = ""
-    browser_auth_facts: dict[str, Any] = field(default_factory=dict)
-    browser_barrier_kind: str = ""
-    browser_barrier_facts: dict[str, Any] = field(default_factory=dict)
     browser_next_user_action: str = ""
     browser_resume_strategy: str = ""
     browser_sub_intent: str = ""

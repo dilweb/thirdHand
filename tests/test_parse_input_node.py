@@ -71,7 +71,6 @@ class TestParseInputNode:
                 "browser_goal": "Откликнуться на вакансии Python на hh.ru",
                 "canonical_user_objective": "Откликнуться на вакансии Python на hh.ru",
                 "browser_final_url": "https://hh.ru/search/vacancy",
-                "browser_debug_note": "Модель перестала вызывать инструменты",
                 "awaiting_user_step": True,
             },
         )

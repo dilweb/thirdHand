@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.thirdhand.agent.graph import graph
 from src.thirdhand.agent.schemas import PendingTask
 from src.thirdhand.agent.state import AgentState
+from src.thirdhand.browser_core.api import discard_parked_browser_session_for_user
 from src.thirdhand.models import UserProfileQueries
 from src.thirdhand.services import redis_history
 from src.thirdhand.services.bio_extractor import extract_bio_facts, merge_facts
@@ -24,7 +25,6 @@ from src.thirdhand.services.context_builder import (
     compress_if_needed,
 )
 from src.thirdhand.services.telegram_format import format_agent_reply_for_telegram
-from src.thirdhand.services.browser_agent import discard_parked_browser_session_for_user
 
 logger = structlog.get_logger(__name__)
 router = Router()
@@ -275,7 +275,25 @@ async def handle_message(
                 "graph_invocation_failed", user_id=user_id, run_id=run_id, error=str(e)
             )
             if _is_latest_run(user_id, run_id):
-                await message.answer("⚠️ Произошла ошибка. Попробуй ещё раз позже.")
+                # Check if this is a browser task with partial results
+                # Use getattr since state is an AgentState object, not a dict
+                browser_screenshot = (getattr(state, "browser_screenshot_png_base64", "") or "").strip()
+                browser_response = (getattr(state, "response_text", "") or "").strip()
+                browser_needs_input = getattr(state, "browser_needs_user_input", False)
+                
+                # If browser already produced output, show it instead of error
+                if browser_response and browser_needs_input:
+                    response_text = format_agent_reply_for_telegram(browser_response)
+                    if browser_screenshot:
+                        try:
+                            raw_png = base64.b64decode(browser_screenshot, validate=True)
+                            await message.answer_photo(photo=BufferedInputFile(raw_png, filename="browser.png"), caption=response_text)
+                        except Exception:
+                            await message.answer(response_text)
+                    else:
+                        await message.answer(response_text)
+                else:
+                    await message.answer("⚠️ Произошла ошибка. Попробуй ещё раз позже.")
             return
 
         if not _is_latest_run(user_id, run_id):
@@ -441,10 +459,6 @@ async def _sync_pending_task(user_id: int, user_message: str, result: dict) -> N
             clarification_question=result.get("response_text", ""),
             blocker_type=result.get("browser_blocker_type", "") or "",
             browser_final_url=result.get("browser_final_url", "") or "",
-            browser_debug_note=result.get("browser_debug_note", "") or "",
-            browser_auth_facts=dict(result.get("browser_auth_facts") or {}),
-            browser_barrier_kind=str(result.get("browser_barrier_kind", "") or ""),
-            browser_barrier_facts=dict(result.get("browser_barrier_facts") or {}),
             browser_next_user_action=str(result.get("browser_next_user_action", "") or ""),
             browser_resume_strategy=str(result.get("browser_resume_strategy", "") or ""),
             browser_sub_intent=str(result.get("browser_sub_intent", "") or ""),

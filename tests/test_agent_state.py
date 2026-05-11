@@ -37,10 +37,6 @@ class TestAgentState:
         assert state.browser_final_url == ""
         assert state.browser_needs_user_input is False
         assert state.browser_blocker_type == ""
-        assert state.browser_debug_note == ""
-        assert state.browser_auth_facts == {}
-        assert state.browser_barrier_kind == ""
-        assert state.browser_barrier_facts == {}
         assert state.browser_next_user_action == ""
         assert state.browser_resume_strategy == ""
         assert state.browser_sub_intent == ""
@@ -89,8 +85,6 @@ class TestPendingTaskBrowserStructuredFields:
 
     def test_default_values(self) -> None:
         task = PendingTask()
-        assert task.browser_barrier_kind == ""
-        assert task.browser_barrier_facts == {}
         assert task.browser_next_user_action == ""
         assert task.browser_resume_strategy == ""
         assert task.browser_sub_intent == ""

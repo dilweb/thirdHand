@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 
@@ -134,10 +132,6 @@ class PendingTask(BaseModel):
     blocker_type: str = ""
     browser_final_url: str = ""
     awaiting_user_step: bool = False
-    browser_debug_note: str = ""
-    browser_auth_facts: dict[str, Any] = Field(default_factory=dict)
-    browser_barrier_kind: str = ""
-    browser_barrier_facts: dict[str, Any] = Field(default_factory=dict)
     browser_next_user_action: str = ""
     browser_resume_strategy: str = ""
     browser_sub_intent: str = ""

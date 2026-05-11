@@ -235,8 +235,8 @@ class TestHandleMessage:
 
 
 @pytest.mark.asyncio
-async def test_sync_pending_task_persists_browser_barrier_fields() -> None:
-    """Stage 13: structured browser fields round-trip into the pending-task envelope."""
+async def test_sync_pending_task_persists_browser_core_fields() -> None:
+    """Browser core fields round-trip into the pending-task envelope."""
     result = {
         "browser_needs_user_input": True,
         "browser_goal": "open example",
@@ -244,13 +244,10 @@ async def test_sync_pending_task_persists_browser_barrier_fields() -> None:
         "user_goal": "visit example.com",
         "browser_blocker_type": "login",
         "browser_final_url": "https://example.com/login",
-        "browser_debug_note": "bootstrap blocked",
-        "browser_auth_facts": {"facts_version": 1},
-        "browser_barrier_kind": "login",
-        "browser_barrier_facts": {"facts_version": 1, "page_url": "https://example.com/login"},
         "browser_next_user_action": "Sign in manually",
         "browser_resume_strategy": "await_user_message",
         "browser_sub_intent": "browser_apply_to_targets",
+        "browser_stop_reason": "ask_user",
         "response_text": "Нужно твоё действие",
     }
     with patch(
@@ -261,12 +258,10 @@ async def test_sync_pending_task_persists_browser_barrier_fields() -> None:
 
     mock_set.assert_awaited_once()
     payload = mock_set.call_args[0][1]
-    assert payload["browser_barrier_kind"] == "login"
-    assert payload["browser_barrier_facts"]["page_url"] == "https://example.com/login"
     assert payload["browser_next_user_action"] == "Sign in manually"
     assert payload["browser_resume_strategy"] == "await_user_message"
     assert payload["browser_sub_intent"] == "browser_apply_to_targets"
-    assert payload["browser_auth_facts"]["facts_version"] == 1
+    assert payload["browser_stop_reason"] == "ask_user"
     assert payload["canonical_user_objective"] == "visit example.com"
     assert payload["user_goal"] == "visit example.com"
 

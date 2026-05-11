@@ -31,7 +31,6 @@ def _format_active_task_context(active_task_context: dict) -> str:
         ("browser_next_user_action", "Suggested next action"),
         ("browser_resume_strategy", "Resume strategy"),
         ("browser_stop_reason", "Stop reason"),
-        ("browser_debug_note", "Debug note"),
         ("clarification_question", "Clarification"),
     )
     for key, label in labels:

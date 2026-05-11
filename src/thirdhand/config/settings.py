@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     # Browser automation
     BROWSER_HEADLESS: bool = False
     BROWSER_PROFILE_DIR: str = ".browser-profile"
-    BROWSER_MAX_STEPS: int = 18
+    BROWSER_MAX_STEPS: int = 50
     BROWSER_SNAPSHOT_TEXT_LIMIT: int = 4000
     # Upper bound how long `ainvoke` may run for one browser-agent LLM step (includes slow providers).
     BROWSER_LLM_STEP_TIMEOUT_SECONDS: int = Field(default=690, ge=120)

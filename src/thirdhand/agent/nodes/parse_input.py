@@ -8,13 +8,13 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from src.thirdhand.agent.schemas import TaskAnalysis
 from src.thirdhand.agent.state import AgentState
-from src.thirdhand.config import settings
-from src.thirdhand.services.browser_flow import infer_browser_sub_intent
-from src.thirdhand.services.browser_goal_context import (
+from src.thirdhand.browser_core.goal_context import (
     build_operational_browser_goal,
     derive_canonical_objective_from_pending,
     truncate_display_title,
 )
+from src.thirdhand.browser_core.sub_intent import infer_browser_sub_intent
+from src.thirdhand.config import settings
 from src.thirdhand.services.llm import create_llm, preview_for_log, safe_invoke
 
 logger = structlog.get_logger(__name__)
@@ -134,7 +134,6 @@ def _summarize_active_task_context(pending_task: dict[str, Any]) -> dict[str, An
         "awaiting_user_step",
         "blocker_type",
         "browser_final_url",
-        "browser_debug_note",
         "browser_next_user_action",
         "browser_resume_strategy",
         "browser_stop_reason",
@@ -163,6 +162,9 @@ def _hydrate_browser_continuation_from_pending(
         or str(output.get("user_goal", "") or "").strip()
         or latest_user_message.strip()
     )
+    # browser_final_url may be empty if the page URL wasn't captured at ask_user time.
+    # Don't pass a garbage URL - build_operational_browser_goal will fall back to
+    # "Continue from the live page in the session" when resume_url is empty.
     resume_url = str(pending_task.get("browser_final_url", "") or "").strip()
     output["user_goal"] = canon
     output["canonical_user_objective"] = canon
@@ -172,6 +174,10 @@ def _hydrate_browser_continuation_from_pending(
         latest_user_message=latest_user_message,
         resume_url=resume_url,
     )
+    # When browser_final_url is missing but we have a parked session,
+    # the LLM will get the current page snapshot from bootstrap_live_continuation
+    # and can inspect the page to find the right elements.
+    output["entities"]["browser_final_url"] = resume_url
     output["entities"]["user_goal"] = canon
     output["entities"]["browser_goal"] = output["browser_goal"]
     output["entities"]["canonical_user_objective"] = canon
@@ -182,50 +188,14 @@ def _hydrate_browser_continuation_from_pending(
 
 
 def _fallback_task_analysis(message_text: str) -> TaskAnalysis:
-    """Best-effort deterministic fallback when structured output fails."""
-    normalized = " ".join((message_text or "").lower().split())
-
-    if any(token in normalized for token in ("напомни", "напомнить", "remind")):
-        return TaskAnalysis(
-            intent="reminder",
-            user_goal=message_text,
-            routing_reason="Fallback reminder heuristic matched reminder wording.",
-        )
-
-    browser_markers = (
-        "hh",
-        "hh.ru",
-        "отклик",
-        "ваканс",
-        "зайди",
-        "зайти",
-        "в браузере",
-        "войди",
-        "логин",
-        "закажи",
-        "оформи",
-        "купи",
+    """Fallback when structured LLM output fails - no hardcoded markers, use LLM only."""
+    # No hardcoded markers - rely entirely on LLM classification
+    # If LLM fails, return a generic fallback that asks for clarification
+    return TaskAnalysis(
+        intent="chat",
+        user_goal=message_text,
+        routing_reason="Fallback: LLM classification failed, defaulting to chat.",
     )
-    if any(token in normalized for token in browser_markers):
-        return TaskAnalysis(
-            intent="browser_task",
-            browser_goal=message_text,
-            user_goal=message_text,
-            requires_browser=True,
-            routing_reason="Fallback browser heuristic matched site/action wording.",
-        )
-
-    search_markers = ("найди", "поиск", "погода", "новости", "что такое", "сколько", "где", "когда")
-    if any(token in normalized for token in search_markers):
-        return TaskAnalysis(
-            intent="search",
-            search_query=message_text,
-            user_goal=message_text,
-            requires_web_search=True,
-            routing_reason="Fallback search heuristic matched information-seeking wording.",
-        )
-
-    return DEFAULT_FALLBACK
 
 
 def _should_relax_browser_missing_context(
@@ -234,30 +204,14 @@ def _should_relax_browser_missing_context(
     missing_context: list[str],
 ) -> bool:
     """Return True when a browser task can start even without preselected links/items.
-
-    Typical case: user explicitly asks the assistant to open the site and search for
-    vacancies/items itself, so the browser agent should gather candidates first
-    instead of demanding links up front.
+    
+    All decisions are made by LLM - no hardcoded markers.
     """
     if not missing_context:
         return False
-
-    normalized = " ".join(f"{message_text} {browser_goal}".lower().split())
-    search_markers = (
-        "поищи",
-        "найди",
-        "поиск",
-        "search",
-        "find",
-        "headhunter",
-        "hh",
-        "hh.ru",
-        "ваканс",
-    )
+    # Let LLM decide if context can be relaxed based on the goal
     relaxed_keys = {"vacancy_links", "vacancy_link", "links", "item_links", "result_links"}
-    return any(marker in normalized for marker in search_markers) and set(missing_context).issubset(
-        relaxed_keys
-    )
+    return set(missing_context).issubset(relaxed_keys)
 
 
 def parse_input_node(state: AgentState) -> dict:
@@ -506,7 +460,32 @@ def parse_input_node(state: AgentState) -> dict:
         output["browser_sub_intent"] = ""
     output["entities"]["browser_sub_intent"] = output["browser_sub_intent"]
 
+    # Preserve pending browser task when it was waiting for user input.
+    # When a browser task calls ask_user, it parks the session and sets await_user_step=True.
+    # ANY user reply should continue that task - we don't wait for LLM to correctly classify
+    # continue_pending_task, because the user's phone number reply IS the continuation.
     if (
+        pending_task.get("intent") == "browser_task"
+        and pending_task.get("awaiting_user_step")
+    ):
+        output["preserve_pending_task"] = True
+        # Force requires_browser so router sends to run_browser_task node
+        output["requires_browser"] = True
+        output["entities"]["requires_browser"] = True
+        # Hydrate the continuation so browser node gets resume_url
+        if not output.get("browser_goal"):
+            _hydrate_browser_continuation_from_pending(
+                pending_task=pending_task,
+                latest_user_message=state.message_text,
+                output=output,
+            )
+        logger.info(
+            "pending_browser_awaiting_user_reply_preserved",
+            user_id=state.user_id,
+            browser_final_url=pending_task.get("browser_final_url", ""),
+            intent=intent,
+        )
+    elif (
         active_task_intent
         and bool(analysis.continue_pending_task)
         and intent == "chat"

@@ -78,6 +78,38 @@ def _is_retryable_llm_error(exc: BaseException) -> bool:
     status_code = getattr(exc, "status_code", None)
     if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
         return True
+    # OpenRouter sometimes wraps 429 in ValueError({'code': 429, ...})
+    if isinstance(exc, ValueError):
+        for arg in exc.args:
+            if isinstance(arg, dict):
+                code = arg.get("code") or arg.get("status_code")
+                if code in {408, 409, 425, 429, 500, 502, 503, 504}:
+                    return True
+        # Also check nested causes
+        cause = exc.__cause__ or exc.__context__
+        if cause is not None:
+            return _is_retryable_llm_error(cause)
+    return False
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """Return True for any network-related error (HTTP errors, timeouts, rate limits).
+
+    Works with both OpenAI SDK exceptions and generic exceptions that have
+    a status_code attribute (e.g. ValueError with code 429 from OpenRouter).
+    """
+    if isinstance(exc, (RateLimitError, APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(exc, APIStatusError):
+        return exc.status_code in {408, 409, 425, 429, 500, 502, 503, 504}
+    status_code = getattr(exc, "status_code", None)
+    if status_code in {408, 409, 425, 429, 500, 502, 503, 504}:
+        return True
+    # Check nested causes (e.g. ValueError wrapping a 429)
+    if hasattr(exc, "__cause__") and exc.__cause__ is not None:
+        return _is_network_error(exc.__cause__)
+    if hasattr(exc, "__context__") and exc.__context__ is not None:
+        return _is_network_error(exc.__context__)
     return False
 
 
@@ -139,6 +171,50 @@ def llm_retry_sync(
         @wraps(func)
         def wrapper(*args, **kwargs):
             return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def retry_async(
+    *,
+    attempts: int = 4,
+    min_wait_seconds: float = 1.0,
+    max_wait_seconds: float = 20.0,
+    retry_on: Callable[[BaseException], bool] | None = None,
+) -> Callable[[Callable[..., Awaitable]], Callable[..., Awaitable]]:
+    """Generic async retry decorator with exponential backoff + jitter.
+
+    Can be applied to any async function. Uses tenacity's
+    wait_random_exponential for jittered exponential backoff.
+
+    Args:
+        attempts: Maximum number of retry attempts.
+        min_wait_seconds: Minimum wait between retries.
+        max_wait_seconds: Maximum wait between retries.
+        retry_on: Optional callable that takes an exception and returns True
+            if the retry should be attempted. Defaults to _is_network_error.
+
+    Example:
+        @retry_async(attempts=3, min_wait_seconds=0.5, max_wait_seconds=5.0)
+        async def fetch_data(url: str) -> dict:
+            ...
+    """
+    if retry_on is None:
+        retry_on = _is_network_error
+
+    def decorator(func: Callable[..., Awaitable]) -> Callable[..., Awaitable]:
+        @retry(
+            stop=stop_after_attempt(attempts),
+            wait=wait_random_exponential(multiplier=1, min=min_wait_seconds, max=max_wait_seconds),
+            retry=retry_if_exception(retry_on),
+            before_sleep=_log_retry_attempt,
+            reraise=True,
+        )
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            return await func(*args, **kwargs)
 
         return wrapper
 
