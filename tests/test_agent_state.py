@@ -39,7 +39,6 @@ class TestAgentState:
         assert state.browser_blocker_type == ""
         assert state.browser_next_user_action == ""
         assert state.browser_resume_strategy == ""
-        assert state.browser_sub_intent == ""
         assert state.response_text == ""
         assert state.response_type == "text"
         assert state.conversation_history == []
@@ -87,5 +86,4 @@ class TestPendingTaskBrowserStructuredFields:
         task = PendingTask()
         assert task.browser_next_user_action == ""
         assert task.browser_resume_strategy == ""
-        assert task.browser_sub_intent == ""
         assert task.browser_stop_reason == ""

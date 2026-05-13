@@ -1,19 +1,27 @@
-"""Simple observe-act-observe loop for the new browser core."""
+"""Orchestrator for the browser agent loop.
+
+Delegates per-step execution to ``TrajectoryExecutor``.
+Keeps only the loop control (LLM calls, prompt rebuild, step limit).
+"""
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 import structlog
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.thirdhand.browser_core.inspect import compact_inspect_page
+from src.thirdhand.browser_core.executor import TrajectoryExecutor
 from src.thirdhand.browser_core.page_classifier import PageType
+from src.thirdhand.browser_core.planner import HighLevelPlanner
+from src.thirdhand.browser_core.policy import LocalWorkflowPolicy, WorkflowState
+from src.thirdhand.browser_core.recovery import RecoveryLayer, RecoveryAction
+from src.thirdhand.browser_core.sub_intent import WorkflowType
+from src.thirdhand.browser_core.validator import RuntimeValidator
 from src.thirdhand.browser_core.prompts import (
-    build_adaptive_system_prompt,
+    build_browser_core_system_prompt,
     build_browser_core_user_prompt,
     build_no_tool_followup,
 )
@@ -27,41 +35,19 @@ logger = structlog.get_logger(__name__)
 
 ProgressCallback = Callable[[str], Awaitable[None]]
 
-_OBSERVATION_TOOLS = {"open_browser", "goto_url", "click", "type_text", "press_key", "scroll", "wait"}
-
-# Tools that are NEVER blocked by the stuck-tool interceptor.
-# The agent must always be allowed to inspect the page visually or finish.
-# NOTE: ask_user is NOT in this set — when stuck, the agent MUST try
-# use_visual_assist FIRST before asking the user for help.
-_STUCK_SAFE_TOOLS = {"use_visual_assist", "finish_task", "inspect_page"}
-
 # How many (AI + Tool + Snapshot) message triplets to keep in the sliding window.
-# Each triplet is approximately 3 messages.  Keeping 8 means ~24 tail messages
-# plus the protected preamble (system + goal + browser_ready), so the total
-# stays well under 100k tokens for most models.
-_MAX_HISTORY_TRIPLETS = 8
+_MAX_HISTORY_TRIPLETS = 12
 
 
 def _trim_messages(messages: list) -> list:
-    """Keep the preamble and the last N tool-call triplets to bound token usage.
-
-    Protected (never trimmed):
-      - messages[0]: SystemMessage (system prompt)
-      - messages[1]: HumanMessage with the user goal
-      - messages[2]: HumanMessage "browser ready + initial snapshot"
-
-    Everything after index 2 is trimmed to the last
-    ``_MAX_HISTORY_TRIPLETS * 3`` messages.
-    """
-    preamble_end = 3  # indices 0, 1, 2 are always kept
+    """Keep the preamble and the last N tool-call triplets to bound token usage."""
+    preamble_end = 3
     if len(messages) <= preamble_end:
         return messages
-
     tail = messages[preamble_end:]
     keep = _MAX_HISTORY_TRIPLETS * 3
     if len(tail) > keep:
         tail = tail[-keep:]
-
     return messages[:preamble_end] + tail
 
 
@@ -96,31 +82,6 @@ def _parse_snapshot(snapshot_text: str) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _parse_visual_payload(raw_result: Any) -> dict[str, Any]:
-    if not isinstance(raw_result, str):
-        return {}
-    text = raw_result.strip()
-    if not text:
-        return {}
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    if not text.startswith("{"):
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            text = text[start : end + 1]
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
 async def run_browser_core_loop(
     *,
     session: BrowserSession,
@@ -132,18 +93,17 @@ async def run_browser_core_loop(
     reuse_parked_live_tab: bool = False,
     latest_user_message: str = "",
 ) -> BrowserCoreRunResult:
-    """Run the new minimal browser loop."""
+    """Run the browser agent loop."""
     tools = build_browser_core_tools(session)
     llm = create_llm(model=settings.BROWSER_MODEL or None, temperature=0.0).bind_tools(
         list(tools.values())
     )
 
-    # Unified tracking state (replaces scattered scalar variables)
     tracking = BrowserTrackingState()
 
     trace: list[str] = []
     messages = [
-        SystemMessage(content=build_adaptive_system_prompt(context_text)),
+        SystemMessage(content=build_browser_core_system_prompt(context_text)),
         HumanMessage(content=build_browser_core_user_prompt(goal)),
     ]
 
@@ -189,14 +149,120 @@ async def run_browser_core_loop(
     trace.append("inspect_page: {}")
     messages.append(HumanMessage(content=f"Актуальное состояние страницы:\n{initial_snapshot}"))
 
-    # Initialise tracking with the first snapshot
-    tracking.update_structural_signature(latest_snapshot)
+    # Initialise tracking
+    last_structural_signature = tracking.structural_signature(latest_snapshot)
     tracking.classify_page(latest_snapshot)
+    policy = LocalWorkflowPolicy()
+
+    # ---- Plan the task ----
+    plan = await HighLevelPlanner.plan(goal, context_text)
+
+    logger.info(
+        "browser_core_plan",
+        user_id=user_id,
+        primary_workflow=plan.primary_workflow.value,
+        fast_path=plan.fast_path,
+        estimated_steps=plan.estimated_steps,
+        subtask_count=len(plan.subtasks),
+        expected_first_actions=plan.expected_first_actions,
+        summary=plan.summary[:200] if plan.summary else "",
+    )
+
+    # Aggregated cost tracking for the entire task
+    _total_cost: float = 0.0
+    _total_prompt_tokens: int = 0
+    _total_completion_tokens: int = 0
+
+    # ---- Inject plan into system prompt ----
+    plan_context = ""
+    if not plan.fast_path:
+        parts: list[str] = []
+        if plan.expected_flow:
+            parts.append(
+                "\n---\n📋 PLAN:\n" + "\n".join(
+                    f"Step {s['step']}: {s['description']}"
+                    for s in plan.expected_flow[:5]
+                )
+            )
+        if plan.expected_first_actions:
+            parts.append(
+                "\n📋 FIRST ACTIONS:\n" + "\n".join(
+                    f"  • {a}" for a in plan.expected_first_actions
+                )
+            )
+        if parts:
+            plan_context = "\n\n".join(parts)
+    messages[0] = SystemMessage(
+        content=build_browser_core_system_prompt(context_text) + plan_context
+    )
+
+    # ---- Initialise policy from plan ----
+    _WORKFLOW_TO_STATE = {
+        WorkflowType.DISCOVER: WorkflowState.DISCOVER,
+        WorkflowType.SELECT: WorkflowState.SELECT,
+        WorkflowType.APPLY: WorkflowState.APPLY,
+        WorkflowType.MONITOR: WorkflowState.MONITOR,
+        WorkflowType.FILL: WorkflowState.APPLY,
+    }
+    plan_state = _WORKFLOW_TO_STATE.get(plan.primary_workflow)
+    if plan_state:
+        policy.transition_to(plan_state)
+        logger.info(
+            "browser_core_policy_initialised",
+            user_id=user_id,
+            from_workflow=plan.primary_workflow.value,
+            to_state=plan_state.value,
+        )
+
+    # ---- Initialise multi-item tracking from plan ----
+    if plan.subtasks:
+        _ACTION_WORKFLOWS = {WorkflowType.APPLY, WorkflowType.FILL, WorkflowType.DISCOVER}
+        action_subtasks = [s for s in plan.subtasks if s.workflow in _ACTION_WORKFLOWS]
+        if action_subtasks:
+            tracking.items_total = len(action_subtasks)
+            logger.info(
+                "browser_core_multi_item_tracking",
+                user_id=user_id,
+                items_total=tracking.items_total,
+                action_workflows=[s.workflow.value for s in action_subtasks],
+            )
+
+    # ---- Fast Path: skip policy for simple tasks ----
+    if plan.fast_path:
+        logger.info("browser_core_fast_path", user_id=user_id, goal=goal[:80])
+        # Fast path: just one LLM call with the plan as context
+        ai_message = await ainvoke_with_retry(llm, messages)
+        tool_calls = getattr(ai_message, "tool_calls", None) or []
+        if tool_calls:
+            batch_result = await TrajectoryExecutor.execute_batch(
+                session=session, tools=tools, tool_calls=tool_calls,
+                goal=goal, messages=messages, trace=trace,
+                latest_snapshot=latest_snapshot,
+                latest_snapshot_text=latest_snapshot_text,
+                last_structural_signature=last_structural_signature,
+            )
+            if batch_result.should_stop:
+                return BrowserCoreRunResult(
+                    trace=batch_result.trace, final_url=batch_result.final_url,
+                    final_message=batch_result.final_message,
+                    needs_user_input=batch_result.needs_user_input,
+                    request_type=batch_result.request_type,
+                    screenshot_png_base64=batch_result.screenshot_png_base64,
+                    stop_reason=batch_result.stop_reason,
+                    metadata={"step_count": 1, **batch_result.metadata},
+                )
+        return BrowserCoreRunResult(
+            trace=trace, final_url=await session.current_url(),
+            final_message="Задача выполнена (fast path).",
+            needs_user_input=False, stop_reason="finish_task",
+            metadata={"step_count": 1, "fast_path": True},
+        )
 
     # Track whether the system prompt needs rebuilding
     last_page_type: PageType = tracking.page_type
     last_cycle_detected: bool = False
     last_no_progress_streak: int = 0
+    last_workflow_state: WorkflowState = policy.state
 
     for step in range(settings.BROWSER_MAX_STEPS):
         # ---- Rebuild system prompt when context changes ----
@@ -205,25 +271,63 @@ async def run_browser_core_loop(
         streak_crossed = (
             tracking.no_progress_streak >= 1 and last_no_progress_streak == 0
         )
-        if page_type_changed or cycle_state_changed or streak_crossed:
-            new_prompt = build_adaptive_system_prompt(
-                context_text=context_text,
+        state_changed = policy.state != last_workflow_state
+        if page_type_changed or cycle_state_changed or streak_crossed or state_changed:
+            # Compose base prompt + policy block + progress
+            base_prompt = build_browser_core_system_prompt(context_text)
+            policy_block = policy.build_prompt_block(
                 page_type=tracking.page_type,
                 no_progress_streak=tracking.no_progress_streak,
                 cycle_detected=tracking.is_cycling(),
             )
-            # Replace the system message at index 0
-            messages[0] = SystemMessage(content=new_prompt)
+            progress_block = tracking.progress_summary()
+            full_prompt = base_prompt
+            if policy_block:
+                full_prompt += f"\n{policy_block}"
+            if progress_block:
+                full_prompt += f"\n\n{progress_block}"
+            messages[0] = SystemMessage(content=full_prompt)
+            if state_changed:
+                logger.info(
+                    "browser_core_policy_transition",
+                    user_id=user_id,
+                    step=step + 1,
+                    from_state=last_workflow_state.value,
+                    to_state=policy.state.value,
+                )
             last_page_type = tracking.page_type
             last_cycle_detected = tracking.is_cycling()
             last_no_progress_streak = tracking.no_progress_streak
+            last_workflow_state = policy.state
 
         messages = _trim_messages(messages)
         ai_message = await ainvoke_with_retry(llm, messages)
         messages.append(ai_message)
         tool_calls = getattr(ai_message, "tool_calls", None) or []
 
-        # Emit LLM's actual reasoning as progress instead of a hardcoded status
+        # Accumulate cost from this LLM call
+        meta = getattr(ai_message, "response_metadata", None) or {}
+        if isinstance(meta, dict):
+            usage = meta.get("token_usage") or {}
+            if isinstance(usage, dict):
+                _total_cost += usage.get("cost", 0) or 0
+                _total_prompt_tokens += usage.get("prompt_tokens", 0) or 0
+                _total_completion_tokens += usage.get("completion_tokens", 0) or 0
+
+        logger.info(
+            "browser_core_llm_raw_response",
+            user_id=user_id,
+            step=step + 1,
+            tool_calls_count=len(tool_calls),
+            tool_calls=[
+                {"name": c.get("name"), "args": dict(c.get("args", {}))}
+                for c in tool_calls
+            ],
+            full_content=getattr(ai_message, "content", "") or "",
+            response_metadata=getattr(ai_message, "response_metadata", None),
+        )
+
+        # Emit LLM reasoning as progress
         llm_content = getattr(ai_message, "content", "") or ""
         await _emit_progress(progress_callback, llm_content)
 
@@ -262,298 +366,260 @@ async def run_browser_core_loop(
             continue
 
         tracking.no_tool_steps = 0
-        for call in tool_calls:
-            tool_name = str(call.get("name", "") or "")
-            args = call.get("args", {}) or {}
-            trace.append(f"{tool_name}: {preview_for_log(args, limit=800)}")
 
-            if tool_name == "finish_task":
-                final_url = await session.current_url()
-                summary = str(args.get("summary", "") or "").strip()
-                status = str(args.get("status", "completed") or "completed").strip()
-                screenshot_b64 = ""
-                if status != "completed":
-                    screenshot = await session.capture_screenshot_data_url()
-                    screenshot_b64 = screenshot.split(",", 1)[1] if "," in screenshot else screenshot
+        # ---- Execute all tool calls as one batch ----
+        batch_result = await TrajectoryExecutor.execute_batch(
+            session=session,
+            tools=tools,
+            tool_calls=tool_calls,
+            goal=goal,
+            messages=messages,
+            trace=trace,
+            latest_snapshot=latest_snapshot,
+            latest_snapshot_text=latest_snapshot_text,
+            last_structural_signature=last_structural_signature,
+        )
+
+        # ---- Reintegrate updated state ----
+        messages = batch_result.messages
+        trace = batch_result.trace
+        latest_snapshot = batch_result.latest_snapshot
+        latest_snapshot_text = batch_result.latest_snapshot_text
+        last_structural_signature = batch_result.last_structural_signature
+
+        # ---- Handle stop / terminal signals ----
+        if batch_result.should_stop:
+            if batch_result.stop_reason in ("finish_task", "ask_user"):
                 return BrowserCoreRunResult(
-                    trace=trace,
-                    final_url=final_url,
-                    final_message=summary,
-                    needs_user_input=status != "completed",
-                    request_type="other",
-                    screenshot_png_base64=screenshot_b64,
-                    stop_reason="finish_task",
-                    metadata={"status": status, "step_count": step + 1},
+                    trace=batch_result.trace,
+                    final_url=batch_result.final_url,
+                    final_message=batch_result.final_message,
+                    needs_user_input=batch_result.needs_user_input,
+                    request_type=batch_result.request_type,
+                    screenshot_png_base64=batch_result.screenshot_png_base64,
+                    stop_reason=batch_result.stop_reason,
+                    metadata={
+                        "step_count": step + 1,
+                        **batch_result.metadata,
+                    },
                 )
+            screenshot = await session.capture_screenshot_data_url()
+            screenshot_b64 = screenshot.split(",", 1)[1] if "," in screenshot else screenshot
+            return BrowserCoreRunResult(
+                trace=batch_result.trace,
+                final_url=await session.current_url(),
+                final_message=batch_result.final_message,
+                needs_user_input=True,
+                request_type=batch_result.request_type,
+                screenshot_png_base64=screenshot_b64,
+                stop_reason="ask_user",
+                metadata={
+                    "step_count": step + 1,
+                    **batch_result.metadata,
+                },
+            )
 
-            if tool_name == "ask_user":
-                final_url = await session.current_url()
-                prompt = str(args.get("prompt", "") or "").strip()
-                request_type = str(args.get("request_type", "other") or "other").strip()
+        # ---- Record actions in tracking (for all executed calls) ----
+        for executed in batch_result.executed_calls:
+            tracking.record_action(
+                executed["name"], executed["args"], latest_snapshot
+            )
+
+        # ---- Analyse visual-assist results for captcha detection ----
+        # The LLM reads the raw vision text directly and decides how to proceed
+        # for other situations (login, modal, empty results) on its own.
+        for i, executed in enumerate(batch_result.executed_calls):
+            if executed["name"] == "use_visual_assist":
+                vision_text = ""
+                if i < len(batch_result.tool_results):
+                    vision_text = str(batch_result.tool_results[i] or "").lower()
+                if vision_text and any(kw in vision_text for kw in
+                    ("captcha", "капча", "verify you're human", "human verification")):
+                    visual_payload = {
+                        "task_type": "captcha",
+                        "captcha_text": "",
+                        "label": "",
+                        "button_hint": "",
+                    }
+                    vision_recovery = RecoveryLayer.assess_visual_assist_result(
+                        visual_payload,
+                        visual_assist_same_page_streak=tracking.visual_assist_same_page_streak,
+                    )
+                    if vision_recovery and vision_recovery.action != RecoveryAction.CONTINUE:
+                        logger.info(
+                            "browser_core_captcha_detected",
+                            user_id=user_id,
+                            step=step + 1,
+                            recovery_action=vision_recovery.action.value,
+                        )
+                        if vision_recovery.message:
+                            messages.append(HumanMessage(content=vision_recovery.message))
+
+        # ---- Batch-level validation ----
+        verdict = RuntimeValidator.validate(
+            tool_name=batch_result.executed_calls[-1]["name"] if batch_result.executed_calls else "",
+            tool_failed=batch_result.batch_failed,
+            snapshot=latest_snapshot,
+            previous_signature=last_structural_signature,
+            cycle_detector=tracking.cycle_detector,
+        )
+        last_structural_signature = verdict.structural_signature
+
+        logger.info(
+            "browser_core_validation_verdict",
+            user_id=user_id,
+            step=step + 1,
+            batch_size=len(batch_result.executed_calls),
+            progress_made=verdict.progress_made,
+            reason=verdict.reason,
+            cycle_detected=verdict.cycle_detected,
+            structural_signature=verdict.structural_signature[:48] if verdict.structural_signature else "",
+            no_progress_streak=tracking.no_progress_streak,
+        )
+
+        # ---- Update state based on verdict ----
+        if not verdict.progress_made:
+            tracking.no_progress_streak += 1
+            if tracking.no_progress_streak == 1:
+                last_call = batch_result.executed_calls[-1] if batch_result.executed_calls else {}
+                tracking.last_stuck_tool_name = last_call.get("name", "")
+        else:
+            tracking.no_progress_streak = 0
+            tracking.last_stuck_tool_name = ""
+            tracking.visual_assist_called_during_stuck = False
+
+            # ---- Suggest FSM transition after successful step ----
+            suggested = policy.suggest_transition(
+                page_type=tracking.page_type,
+                no_progress_streak=tracking.no_progress_streak,
+                cycle_detected=tracking.is_cycling(),
+            )
+            if suggested and suggested != policy.state:
+                logger.info(
+                    "browser_core_policy_suggested_transition",
+                    user_id=user_id,
+                    step=step + 1,
+                    from_state=policy.state.value,
+                    to_state=suggested.value,
+                )
+                policy.transition_to(suggested)
+
+                # ---- Replan after COMPLETE if more items remain ----
+                if suggested == WorkflowState.COMPLETE and tracking.items_total > 0 \
+                        and tracking.items_completed < tracking.items_total:
+                    logger.info(
+                        "browser_core_replan_after_complete",
+                        user_id=user_id,
+                        step=step + 1,
+                        items_completed=tracking.items_completed,
+                        items_total=tracking.items_total,
+                    )
+                    plan = await HighLevelPlanner.plan(goal, context_text)
+                    plan_state = _WORKFLOW_TO_STATE.get(plan.primary_workflow)
+                    if plan_state:
+                        policy.transition_to(plan_state)
+                        logger.info(
+                            "browser_core_replanned",
+                            user_id=user_id,
+                            step=step + 1,
+                            new_workflow=plan.primary_workflow.value,
+                            new_state=plan_state.value,
+                        )
+
+        # ---- Recovery ----
+        if not verdict.progress_made:
+            logger.info(
+                "browser_core_no_progress_detected",
+                user_id=user_id,
+                step=step + 1,
+                batch_size=len(batch_result.executed_calls),
+                no_progress_streak=tracking.no_progress_streak,
+            )
+
+            recovery_decision = RecoveryLayer.assess_no_progress(
+                tracking.no_progress_streak,
+                latest_snapshot,
+                estimated_steps=plan.estimated_steps,
+            )
+
+            logger.info(
+                "browser_core_recovery_decision",
+                user_id=user_id,
+                step=step + 1,
+                action=recovery_decision.action.value,
+                message=recovery_decision.message[:200] if recovery_decision.message else "",
+                metadata=recovery_decision.metadata,
+            )
+
+            if recovery_decision.action == RecoveryAction.VISION_ASSIST:
+                messages.append(HumanMessage(content=recovery_decision.message))
+
+            elif recovery_decision.action == RecoveryAction.ALTERNATIVE_POLICY:
+                situation = (recovery_decision.metadata or {}).get("situation", "")
+                _SITUATION_TO_STATE = {
+                    "login": WorkflowState.APPLY,
+                    "captcha": WorkflowState.APPLY,
+                    "modal": WorkflowState.APPLY,
+                    "pagination": WorkflowState.DISCOVER,
+                    "empty_results": WorkflowState.ALTERNATE_SEARCH,
+                    "form_error": WorkflowState.APPLY,
+                    "rate_limit": WorkflowState.AWAIT_USER,
+                }
+                target_state = _SITUATION_TO_STATE.get(situation)
+                if target_state:
+                    policy.transition_to(target_state)
+                    # Track multi-item progress: APPLY → DISCOVER = one item done
+                    if target_state == WorkflowState.DISCOVER and tracking.items_total > 0:
+                        completed = tracking.increment_completed()
+                        logger.info(
+                            "browser_core_item_completed",
+                            user_id=user_id,
+                            step=step + 1,
+                            items_completed=completed,
+                            items_total=tracking.items_total,
+                        )
+                if recovery_decision.message:
+                    messages.append(HumanMessage(content=recovery_decision.message))
+
+            elif recovery_decision.action == RecoveryAction.REPLAN:
+                plan = await HighLevelPlanner.plan(goal, context_text)
+                plan_state = _WORKFLOW_TO_STATE.get(plan.primary_workflow)
+                if plan_state:
+                    policy.transition_to(plan_state)
+                if recovery_decision.message:
+                    messages.append(HumanMessage(content=recovery_decision.message))
+
+            elif recovery_decision.action == RecoveryAction.HUMAN_INTERVENTION:
                 screenshot = await session.capture_screenshot_data_url()
                 screenshot_b64 = screenshot.split(",", 1)[1] if "," in screenshot else screenshot
                 return BrowserCoreRunResult(
                     trace=trace,
-                    final_url=final_url,
-                    final_message=prompt,
+                    final_url=await session.current_url(),
+                    final_message=recovery_decision.message,
                     needs_user_input=True,
-                    request_type=request_type,
+                    request_type="other",
                     screenshot_png_base64=screenshot_b64,
                     stop_reason="ask_user",
-                    metadata={"step_count": step + 1},
-                )
-
-            # ---- Stuck-tool interceptor: force use_visual_assist ----
-            if _is_stuck_tool(tool_name, tracking):
-                if tool_name == "ask_user":
-                    reject_msg = (
-                        "ERROR: Action rejected — you are stuck and must first "
-                        "call use_visual_assist to understand the page.\n"
-                        "Do NOT ask the user yet. Call use_visual_assist first."
-                    )
-                else:
-                    reject_msg = (
-                        "ERROR: Action rejected — you are repeating the same type "
-                        f"of action ({tool_name}) without making progress.\n"
-                        "You MUST call use_visual_assist to understand the page "
-                        "before taking any other action."
-                    )
-                result = reject_msg
-                logger.info(
-                    "browser_core_tool_rejected_stuck",
-                    user_id=user_id,
-                    step=step + 1,
-                    tool_name=tool_name,
-                    no_progress_streak=tracking.no_progress_streak,
-                )
-            else:
-                # Track when use_visual_assist is called during stuck period
-                if tool_name == "use_visual_assist" and tracking.no_progress_streak >= 2:
-                    tracking.visual_assist_called_during_stuck = True
-
-                # Inject the user's goal into use_visual_assist so the vision
-                # model knows what we're trying to accomplish.
-                if tool_name == "use_visual_assist" and not args.get("goal"):
-                    args["goal"] = goal
-
-                tool = tools[tool_name]
-                try:
-                    result = await tool.ainvoke(args)
-                except Exception as exc:
-                    result = f"ERROR: {type(exc).__name__}: {exc}"
-                    logger.warning(
-                        "browser_core_tool_failed",
-                        user_id=user_id,
-                        step=step + 1,
-                        tool_name=tool_name,
-                        error=str(exc),
-                    )
-            logger.info(
-                "browser_core_tool_result",
-                user_id=user_id,
-                step=step + 1,
-                tool_name=tool_name,
-                args_preview=preview_for_log(args, limit=800),
-                result_preview=preview_for_log(result, limit=3000),
-            )
-
-            action_signature = json.dumps(
-                {"tool_name": tool_name, "args": args},
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-
-            if tool_name == "use_visual_assist":
-                visual_payload = _parse_visual_payload(result)
-                current_signature = json.dumps(
-                    {
-                        "url": await session.current_url(),
-                        "snapshot": latest_snapshot_text,
+                    metadata={
+                        "step_count": step + 1,
+                        **(recovery_decision.metadata or {}),
                     },
-                    ensure_ascii=False,
-                    sort_keys=True,
                 )
-                if current_signature == tracking.last_visual_signature:
-                    tracking.visual_assist_same_page_streak += 1
-                else:
-                    tracking.visual_assist_same_page_streak = 1
-                    tracking.last_visual_signature = current_signature
-
-                task_type = str(visual_payload.get("task_type", "") or "").strip().lower()
-                next_action = str(visual_payload.get("next_action", "") or "").strip()
-                captcha_text = str(visual_payload.get("captcha_text", "") or "").strip()
-                if task_type == "captcha":
-                    label = str(visual_payload.get("label", "") or "").strip()
-                    button_hint = str(visual_payload.get("button_hint", "") or "").strip()
-                    messages.append(
-                        HumanMessage(
-                            content=(
-                                "Visual assist indicates a captcha or human verification step.\n"
-                                f"Vision result: {result}\n"
-                                f"CRITICAL: Your NEXT TWO tool calls MUST be:\n"
-                                f"1. type_text(text='{captcha_text}', label='{label}') — enter the captcha\n"
-                                f"2. click(text='{button_hint}' or 'Отправить' or 'Submit') — click the submit button\n"
-                                f"DO NOT wait for auto-submit. DO NOT call use_visual_assist again.\n"
-                                f"IMMEDIATELY call type_text, then IMMEDIATELY call click on the submit button.\n"
-                                "If type_text fails, try inspect_page to find element_id."
-                            )
-                        )
-                    )
-                    logger.info(
-                        "browser_core_captcha_visual_state",
-                        user_id=user_id,
-                        step=step + 1,
-                        visual_assist_same_page_streak=tracking.visual_assist_same_page_streak,
-                        task_type=task_type,
-                        captcha_text=captcha_text,
-                        next_action=next_action,
-                    )
-                    if tracking.visual_assist_same_page_streak >= 2:
-                        final_url = await session.current_url()
-                        screenshot = await session.capture_screenshot_data_url()
-                        screenshot_b64 = screenshot.split(",", 1)[1] if "," in screenshot else screenshot
-                        return BrowserCoreRunResult(
-                            trace=trace,
-                            final_url=final_url,
-                            final_message=(
-                                "Не удалось завершить автоматически. "
-                                "Реши задачу вручную в открытом браузере, затем напиши «готово»."
-                            ),
-                            needs_user_input=True,
-                            request_type="captcha",
-                            screenshot_png_base64=screenshot_b64,
-                            stop_reason="ask_user",
-                            metadata={
-                                "step_count": step + 1,
-                                "escalation_reason": "captcha_visual_assist_stuck",
-                                "visual_assist_same_page_streak": tracking.visual_assist_same_page_streak,
-                            },
-                        )
-                else:
-                    tracking.visual_assist_same_page_streak = 0
-                    tracking.last_visual_signature = current_signature
-
-            messages.append(
-                ToolMessage(
-                    content=result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
-                    tool_call_id=call["id"],
-                )
-            )
-
-            # ---- Record action in tracking state ----
-            tracking.record_action(tool_name, args, latest_snapshot)
-
-            progress_changed = False
-            # After any observation action, take a compact auto-snapshot to verify
-            # the result.  compact_inspect_page returns ~1-2k tokens instead of
-            # the 30-50k that full inspect_page produces, keeping the context
-            # window bounded.  The LLM can always call inspect_page explicitly
-            # for the full dump if it needs more detail.
-            if tool_name in _OBSERVATION_TOOLS:
-                # After actions that trigger navigation (e.g. type_text with submit=True,
-                # press_key Enter, click on a link), the page may still be loading.
-                # compact_inspect_page will fail with "Execution context was destroyed"
-                # if called during navigation. Retry up to 3 times with a 1s delay.
-                fresh_snapshot = "{}"
-                for _attempt in range(3):
-                    try:
-                        fresh_snapshot = await compact_inspect_page(session.page)
-                        break
-                    except Exception:
-                        await asyncio.sleep(1.0)
-                latest_snapshot_text = fresh_snapshot
-                latest_snapshot = _parse_snapshot(fresh_snapshot)
-                trace.append("inspect_page(compact): {}")
-                messages.append(HumanMessage(content=f"Страница после действия:\n{fresh_snapshot}"))
-                tracking.visual_assist_same_page_streak = 0
-                # Compute new signature WITHOUT storing it yet
-                new_structural_sig = tracking.structural_signature(latest_snapshot)
-                old_structural_sig = tracking.last_structural_signature
-                progress_changed = new_structural_sig != old_structural_sig
-                logger.info(
-                    "browser_core_progress_check",
-                    user_id=user_id,
-                    step=step + 1,
-                    tool_name=tool_name,
-                    progress_changed=progress_changed,
-                    previous_state_signature_preview=preview_for_log(
-                        old_structural_sig, limit=1000
-                    ),
-                    current_state_signature_preview=preview_for_log(new_structural_sig, limit=1000),
-                )
-                # Now store the new signature
-                tracking.last_structural_signature = new_structural_sig
-                # Re-classify page when structure changes
-                tracking.classify_page(latest_snapshot)
-
-            tool_failed = isinstance(result, str) and result.startswith("ERROR:")
-            repeated_same_action = action_signature == tracking.last_action_signature
-            tracking.last_action_signature = action_signature
-
-            # ---- Check progress using the pre-computed progress_changed ----
-            had_progress = tracking.check_progress(
-                tool_name, tool_failed, latest_snapshot, progress_changed
-            )
-
-            if not had_progress:
-                logger.info(
-                    "browser_core_no_progress_detected",
-                    user_id=user_id,
-                    step=step + 1,
-                    tool_name=tool_name,
-                    tool_failed=tool_failed,
-                    repeated_same_action=repeated_same_action,
-                    no_progress_streak=tracking.no_progress_streak,
-                )
-                if tracking.no_progress_streak >= 2:
-                    dialogs_info = ""
-                    if latest_snapshot.get("dialogs"):
-                        dialogs_info = "\nОткрытые диалоги/модалки: " + str(latest_snapshot.get("dialogs")[:500])
-
-                    clickable_hints = latest_snapshot.get("clickable_hints", []) or []
-                    fillable_hints = latest_snapshot.get("fillable_hints", []) or []
-                    hints_info = ""
-                    if clickable_hints:
-                        hints_info += "\nКликабельные элементы: " + ", ".join(clickable_hints[:10])
-                    if fillable_hints:
-                        hints_info += "\nПоля для ввода: " + ", ".join(fillable_hints[:5])
-
-                    messages.append(
-                        HumanMessage(
-                            content=(
-                                "Последние шаги не продвинули задачу.\n"
-                                "Не повторяй то же действие вслепую.\n"
-                                "Используй use_visual_assist чтобы понять что делать дальше.\n"
-                                f"Подсказки из inspect_page:{hints_info}{dialogs_info}"
-                                "\nЕсли модалка требует информацию, которой у тебя нет (сопроводительное письмо, пароль), не закрывай её — вызови ask_user."
-                            )
-                        )
-                    )
-                if tracking.no_progress_streak >= 3:
-                    final_url = await session.current_url()
-                    screenshot = await session.capture_screenshot_data_url()
-                    screenshot_b64 = screenshot.split(",", 1)[1] if "," in screenshot else screenshot
-                    return BrowserCoreRunResult(
-                        trace=trace,
-                        final_url=final_url,
-                        final_message=(
-                            "Не удалось продвинуться после нескольких попыток. "
-                            "Нужна помощь пользователя или более явный ориентир на странице."
-                        ),
-                        needs_user_input=True,
-                        request_type="other",
-                        screenshot_png_base64=screenshot_b64,
-                        stop_reason="ask_user",
-                        metadata={
-                            "step_count": step + 1,
-                            "escalation_reason": "no_progress",
-                            "no_progress_streak": tracking.no_progress_streak,
-                        },
-                    )
 
     final_url = await session.current_url()
     screenshot = await session.capture_screenshot_data_url()
     screenshot_b64 = screenshot.split(",", 1)[1] if "," in screenshot else screenshot
+
+    logger.info(
+        "browser_core_task_completed",
+        user_id=user_id,
+        step_count=step + 1,
+        total_cost=round(_total_cost, 6),
+        total_prompt_tokens=_total_prompt_tokens,
+        total_completion_tokens=_total_completion_tokens,
+        stop_reason="step_limit",
+    )
+
     return BrowserCoreRunResult(
         trace=trace,
         final_url=final_url,
@@ -564,35 +630,3 @@ async def run_browser_core_loop(
         stop_reason="step_limit",
         metadata={"step_count": settings.BROWSER_MAX_STEPS},
     )
-
-
-# ---------------------------------------------------------------------------
-# Stuck-tool interceptor
-# ---------------------------------------------------------------------------
-
-def _is_stuck_tool(tool_name: str, tracking: BrowserTrackingState) -> bool:
-    """Check whether a tool call should be rejected because the agent is stuck.
-
-    When ``no_progress_streak >= 2``:
-
-    * The same tool that caused the stagnation is **blocked**.
-    * ``ask_user`` is **blocked** until the agent has called
-      ``use_visual_assist`` at least once during this stuck period.
-    * ``use_visual_assist``, ``finish_task``, ``inspect_page`` are
-      **always allowed**.
-    """
-    if tracking.no_progress_streak < 2:
-        return False
-
-    # Always allow visual assist, finish, and inspect
-    if tool_name in _STUCK_SAFE_TOOLS:
-        return False
-
-    # Block ask_user unless visual assist was already called
-    if tool_name == "ask_user":
-        return not tracking.visual_assist_called_during_stuck
-
-    # Block the specific tool that caused stagnation
-    if tool_name not in _OBSERVATION_TOOLS:
-        return False
-    return tool_name == tracking.last_stuck_tool_name

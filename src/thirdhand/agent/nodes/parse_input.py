@@ -13,7 +13,6 @@ from src.thirdhand.browser_core.goal_context import (
     derive_canonical_objective_from_pending,
     truncate_display_title,
 )
-from src.thirdhand.browser_core.sub_intent import infer_browser_sub_intent
 from src.thirdhand.config import settings
 from src.thirdhand.services.llm import create_llm, preview_for_log, safe_invoke
 
@@ -137,7 +136,6 @@ def _summarize_active_task_context(pending_task: dict[str, Any]) -> dict[str, An
         "browser_next_user_action",
         "browser_resume_strategy",
         "browser_stop_reason",
-        "browser_sub_intent",
         "clarification_question",
         "missing_context",
     )
@@ -182,9 +180,6 @@ def _hydrate_browser_continuation_from_pending(
     output["entities"]["browser_goal"] = output["browser_goal"]
     output["entities"]["canonical_user_objective"] = canon
     output["entities"]["browser_goal_display"] = output["browser_goal_display"]
-    persisted_si = str(pending_task.get("browser_sub_intent") or "").strip()
-    output["browser_sub_intent"] = persisted_si or infer_browser_sub_intent(canon).value
-    output["entities"]["browser_sub_intent"] = output["browser_sub_intent"]
 
 
 def _fallback_task_analysis(message_text: str) -> TaskAnalysis:
@@ -450,15 +445,6 @@ def parse_input_node(state: AgentState) -> dict:
         output["ambiguous_request"] = True
         output["entities"]["ambiguous_request"] = True
 
-    if output["requires_browser"] and output.get("browser_goal"):
-        output["browser_sub_intent"] = str(output.get("browser_sub_intent", "") or "").strip() or (
-            infer_browser_sub_intent(
-                output.get("canonical_user_objective") or output["browser_goal"]
-            ).value
-        )
-    else:
-        output["browser_sub_intent"] = ""
-    output["entities"]["browser_sub_intent"] = output["browser_sub_intent"]
 
     # Preserve pending browser task when it was waiting for user input.
     # When a browser task calls ask_user, it parks the session and sets await_user_step=True.

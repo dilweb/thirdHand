@@ -134,5 +134,4 @@ class PendingTask(BaseModel):
     awaiting_user_step: bool = False
     browser_next_user_action: str = ""
     browser_resume_strategy: str = ""
-    browser_sub_intent: str = ""
     browser_stop_reason: str = ""

@@ -55,7 +55,6 @@ class AgentState:
     browser_blocker_type: str = ""
     browser_next_user_action: str = ""
     browser_resume_strategy: str = ""
-    browser_sub_intent: str = ""
 
     # Optional: viewport screenshot (e.g. captcha) as raw base64 PNG for Telegram.
     browser_screenshot_png_base64: str = ""

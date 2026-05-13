@@ -75,8 +75,8 @@ class TestCycleDetector:
             d.record_action(tool, args, sig)
         assert not d.is_cycling()
 
-    def test_structural_signature_excludes_url(self) -> None:
-        """URL changes must NOT affect structural signature."""
+    def test_structural_signature_includes_url(self) -> None:
+        """URL changes MUST affect structural signature (different pages)."""
         sig1 = CycleDetector.structural_signature({
             "url": "https://example.com/page1",
             "headings": ["Results"],
@@ -91,7 +91,7 @@ class TestCycleDetector:
             "actionable": [{"tag": "a"}],
             "text": "hello world",
         })
-        assert sig1 == sig2, "URL change must not change structural signature"
+        assert sig1 != sig2, "URL change must change structural signature"
 
     def test_structural_signature_changes_on_content(self) -> None:
         sig1 = CycleDetector.structural_signature({

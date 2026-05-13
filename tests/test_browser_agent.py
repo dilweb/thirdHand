@@ -25,12 +25,10 @@ class TestBrowserTaskResultMapping:
                 stop_reason="ask_user",
                 metadata={"step_count": 2},
             ),
-            sub_intent="browser_apply_to_targets",
         )
         assert result.blocker_type == "2fa"
         assert result.resume_strategy == "await_user_message"
         assert result.next_user_action == "Код из SMS?"
-        assert result.sub_intent == "browser_apply_to_targets"
         assert result.screenshot_png_base64 == "QUJD"
         assert result.stop_reason == "ask_user"
 
@@ -48,7 +46,6 @@ class TestBrowserTaskResultMapping:
                 stop_reason="",
                 metadata={"step_count": 1},
             ),
-            sub_intent="browser_apply_to_targets",
         )
         assert result.needs_user_input is False
         assert result.resume_strategy == "none"
@@ -66,7 +63,6 @@ async def test_run_browser_task_node_maps_public_browser_fields() -> None:
         blocker_type="login",
         next_user_action="sign in",
         resume_strategy="await_user_message",
-        sub_intent="browser_apply_to_targets",
         screenshot_png_base64="dGVzdA==",
         stop_reason="ask_user",
         metadata={"source": "browser_core"},
@@ -79,6 +75,5 @@ async def test_run_browser_task_node_maps_public_browser_fields() -> None:
         )
     assert out["browser_next_user_action"] == "sign in"
     assert out["browser_resume_strategy"] == "await_user_message"
-    assert out["browser_sub_intent"] == "browser_apply_to_targets"
     assert out["browser_screenshot_png_base64"] == "dGVzdA=="
     assert out["browser_stop_reason"] == "ask_user"

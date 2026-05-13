@@ -71,11 +71,11 @@ class TestPageClassifier:
         assert PageClassifier.classify(snap) == PageType.DETAIL_PAGE
 
     def test_classify_generic_page(self) -> None:
-        """Everything else = generic."""
+        """Mixed elements, no dominant type = generic."""
         snap = {
             "headings": ["A", "B", "C", "D"],
-            "actionable": [{"tag": "a"} for _ in range(3)],
-            "fillable": [{"type": "text"}],
+            "actionable": [{"tag": "a"}, {"tag": "a"}, {"tag": "a"}, {"tag": "button"}],
+            "fillable": [{"type": "text"}, {"type": "email"}],
         }
         assert PageClassifier.classify(snap) == PageType.GENERIC_PAGE
 

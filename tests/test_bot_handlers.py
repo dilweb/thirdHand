@@ -246,7 +246,6 @@ async def test_sync_pending_task_persists_browser_core_fields() -> None:
         "browser_final_url": "https://example.com/login",
         "browser_next_user_action": "Sign in manually",
         "browser_resume_strategy": "await_user_message",
-        "browser_sub_intent": "browser_apply_to_targets",
         "browser_stop_reason": "ask_user",
         "response_text": "Нужно твоё действие",
     }
@@ -260,7 +259,6 @@ async def test_sync_pending_task_persists_browser_core_fields() -> None:
     payload = mock_set.call_args[0][1]
     assert payload["browser_next_user_action"] == "Sign in manually"
     assert payload["browser_resume_strategy"] == "await_user_message"
-    assert payload["browser_sub_intent"] == "browser_apply_to_targets"
     assert payload["browser_stop_reason"] == "ask_user"
     assert payload["canonical_user_objective"] == "visit example.com"
     assert payload["user_goal"] == "visit example.com"

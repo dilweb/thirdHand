@@ -111,12 +111,16 @@ async def run_browser_core_task(
                     session=session,
                     parked_at=time.monotonic(),
                 )
+                step_count = (result.metadata or {}).get("step_count", "?")
                 logger.info(
                     "browser_core_session_parked_for_user_reply",
                     user_id=user_id,
                     request_type=result.request_type,
                     url=result.final_url,
                     stop_reason=result.stop_reason,
+                    step_count=step_count,
+                    trace_preview=result.trace[-3:] if result.trace else [],
+                    final_message_preview=(result.final_message or "")[:200],
                 )
             return result
         finally:

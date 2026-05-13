@@ -17,7 +17,6 @@ async def run_browser_task_node(state: AgentState) -> dict:
         has_browser_goal=bool(state.browser_goal),
         has_message_text=bool(state.message_text),
         has_pending_task=bool(state.pending_task),
-        sub_intent=getattr(state, "browser_sub_intent", None),
     )
     
     goal = state.browser_goal or state.message_text
@@ -39,13 +38,11 @@ async def run_browser_task_node(state: AgentState) -> dict:
     if len(page_context_hint) > 600:
         page_context_hint = page_context_hint[:600].rstrip()
 
-    sub_intent = str(getattr(state, "browser_sub_intent", "") or "").strip() or None
     logger.info(
         "browser_node_starting_task",
         user_id=state.user_id,
         goal_preview=goal[:200],
         goal_display=goal_display,
-        sub_intent=sub_intent,
         resume_url=(state.pending_task or {}).get("browser_final_url", ""),
     )
     
@@ -55,7 +52,6 @@ async def run_browser_task_node(state: AgentState) -> dict:
         context_text=state.user_profile.get("context_text", ""),
         progress_callback=state.status_callback,
         resume_url=(state.pending_task or {}).get("browser_final_url", ""),
-        sub_intent=sub_intent,
         goal_display=goal_display,
         page_context_hint=page_context_hint,
         latest_user_message=state.message_text,
@@ -81,7 +77,6 @@ async def run_browser_task_node(state: AgentState) -> dict:
         "browser_blocker_type": result.blocker_type,
         "browser_next_user_action": result.next_user_action,
         "browser_resume_strategy": result.resume_strategy,
-        "browser_sub_intent": result.sub_intent,
         "browser_screenshot_png_base64": result.screenshot_png_base64,
         "browser_stop_reason": result.stop_reason,
         "response_text": result.telegram_report,

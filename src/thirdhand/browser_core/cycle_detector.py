@@ -46,15 +46,30 @@ class CycleDetector:
 
     @staticmethod
     def structural_signature(snapshot: dict[str, Any]) -> str:
-        """Stable structural signature that excludes URL.
+        """Stable structural signature that includes URL path and page structure.
 
-        Only uses page structure: headings, dialogs, element counts,
-        a text hash, and whether a modal/dialog is open.
-        A filter toggle that only changes the URL will NOT change this
-        signature, but opening/closing a dialog overlay will.
+        Uses both URL path (pathname + query params) and page structure:
+        headings, dialogs, element counts, a text hash, and modal state.
+        Two pages with identical structure but different URLs will have
+        different signatures — this prevents false ``no_structural_change``
+        when navigating between similar pages (e.g. different vacancies).
         """
+        # URL component — pathname only (query params don't affect DOM structure).
+        # If a query param changes the page content, that will be reflected in
+        # headings / text_hash / element_counts — no need to track URL params.
+        url = str(snapshot.get("url", "") or "")
+        url_component = ""
+        if url:
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                url_component = parsed.pathname
+            except Exception:
+                url_component = url[:120]
+
         dialogs = [str(d) for d in (snapshot.get("dialogs") or [])[:3]]
         data = {
+            "url": url_component,
             "headings": [str(h) for h in (snapshot.get("headings") or [])[:4]],
             "dialogs": dialogs,
             "fillable_count": len(snapshot.get("fillable") or []),

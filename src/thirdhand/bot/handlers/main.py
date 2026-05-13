@@ -416,7 +416,6 @@ async def _sync_pending_task(user_id: int, user_message: str, result: dict) -> N
             ambiguous_request=bool(result.get("ambiguous_request", False)),
             awaiting_user_step=is_browser_waiting,
             blocker_type="missing_info" if is_browser_waiting else "",
-            browser_sub_intent=str(result.get("browser_sub_intent", "") or ""),
             browser_stop_reason=str(result.get("browser_stop_reason", "") or ""),
         )
         await redis_history.set_pending_task(user_id, pending.model_dump())
@@ -461,7 +460,6 @@ async def _sync_pending_task(user_id: int, user_message: str, result: dict) -> N
             browser_final_url=result.get("browser_final_url", "") or "",
             browser_next_user_action=str(result.get("browser_next_user_action", "") or ""),
             browser_resume_strategy=str(result.get("browser_resume_strategy", "") or ""),
-            browser_sub_intent=str(result.get("browser_sub_intent", "") or ""),
             browser_stop_reason=str(result.get("browser_stop_reason", "") or ""),
             awaiting_user_step=True,
         )

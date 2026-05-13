@@ -34,7 +34,6 @@ class TestParseInputNode:
                 "requires_browser": True,
                 "browser_goal": "Вход на hh.ru",
                 "canonical_user_objective": "Вход на hh.ru",
-                "browser_sub_intent": "browser_apply_to_targets",
                 "blocker_type": "missing_info",
                 "browser_final_url": "https://hh.ru/account/login",
                 "awaiting_user_step": True,
@@ -49,7 +48,6 @@ class TestParseInputNode:
         assert "USER_OBJECTIVE" in result["browser_goal"]
         assert "https://hh.ru/account/login" in result["browser_goal"]
         assert result["user_goal"] == "Вход на hh.ru"
-        assert result["browser_sub_intent"] == "browser_apply_to_targets"
 
     def test_chat_question_can_stay_inside_pending_browser_task(self, monkeypatch) -> None:
         def fake_safe_invoke(chain, llm_input, fallback=None):

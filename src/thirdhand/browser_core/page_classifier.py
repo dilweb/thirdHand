@@ -28,16 +28,20 @@ class PageClassifier:
     def classify(snapshot: dict[str, Any]) -> PageType:
         """Return the structural page type.
 
+        Uses relative proportions instead of absolute thresholds,
+        so classification scales to pages of any size.
+
         Signals used (all language-independent):
         - ``type=password`` on any fillable element  → login
-        - ``autocomplete`` attribute values (standardised)
-        - Number of fillable elements
-        - Number of actionable links vs total actionable
-        - ``role=list`` / ``role=listitem`` on elements
+        - Ratio of links vs total interactive elements
+        - Ratio of fillable fields vs total interactive elements
+        - Number of headings
         """
         fillable = snapshot.get("fillable") or []
         actionable = snapshot.get("actionable") or []
         headings = snapshot.get("headings") or []
+
+        total = len(actionable) + len(fillable)
 
         # ---- Login page: <input type="password"> is universal ----
         if any(
@@ -45,22 +49,25 @@ class PageClassifier:
         ):
             return PageType.LOGIN_PAGE
 
-        # ---- Form page: many fillable fields ----
-        if len(fillable) >= 4:
-            return PageType.FORM_PAGE
-
-        # ---- Search results / listing: many links, few forms ----
         link_count = sum(
             1
             for a in actionable
             if (a.get("tag") or "").lower() in ("a",)
             or (a.get("role") or "").lower() in ("link", "listitem")
         )
-        if link_count >= 5 and len(fillable) <= 2:
+        fillable_ratio = len(fillable) / max(total, 1)
+        link_ratio = link_count / max(total, 1)
+
+        # ---- Form page: fillable fields dominate ----
+        if total > 0 and fillable_ratio > 0.4:
+            return PageType.FORM_PAGE
+
+        # ---- Search results / listing: many links, few fillable ----
+        if total > 0 and link_ratio > 0.6 and fillable_ratio < 0.3:
             return PageType.SEARCH_RESULTS
 
-        # ---- Detail page: few headings, few actions, no forms ----
-        if len(headings) <= 3 and len(actionable) <= 5 and len(fillable) <= 2:
+        # ---- Detail page: has headings, few links, few fillable ----
+        if total > 0 and len(headings) > 0 and link_ratio < 0.6 and fillable_ratio < 0.3:
             return PageType.DETAIL_PAGE
 
         return PageType.GENERIC_PAGE

@@ -27,7 +27,6 @@ class BrowserTaskResult:
     blocker_type: str = "other"
     next_user_action: str = ""
     resume_strategy: str = "none"
-    sub_intent: str = ""
     screenshot_png_base64: str = ""
     stop_reason: str = ""
     metadata: dict = field(default_factory=dict)
@@ -54,7 +53,6 @@ async def run_browser_task(
     context_text: str = "",
     progress_callback: ProgressCallback | None = None,
     resume_url: str = "",
-    sub_intent: str | None = None,
     goal_display: str = "",
     page_context_hint: str = "",
     latest_user_message: str = "",
@@ -73,7 +71,6 @@ async def run_browser_task(
         goal=goal,
         goal_display=goal_display,
         result=core_result,
-        sub_intent=sub_intent or "",
     )
 
 
@@ -97,7 +94,6 @@ def _browser_core_result_to_public(
     goal: str,
     goal_display: str,
     result,
-    sub_intent: str = "",
 ) -> BrowserTaskResult:
     blocker_type = _browser_core_request_type_to_blocker_type(
         str(getattr(result, "request_type", "") or ""),
@@ -139,7 +135,6 @@ def _browser_core_result_to_public(
         blocker_type=blocker_type,
         next_user_action=next_user_action,
         resume_strategy=resume_strategy,
-        sub_intent=str(sub_intent or ""),
         screenshot_png_base64=str(getattr(result, "screenshot_png_base64", "") or ""),
         stop_reason=stop_reason,
         metadata=public_metadata,

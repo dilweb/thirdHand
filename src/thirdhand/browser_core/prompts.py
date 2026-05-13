@@ -1,8 +1,10 @@
-"""Prompt builders for the new browser core."""
+"""Prompt builders for the new browser core.
+
+Adaptive prompt composition moved to ``LocalWorkflowPolicy``
+(see ``policy.py``).
+"""
 
 from __future__ import annotations
-
-from src.thirdhand.browser_core.page_classifier import PageType
 
 
 def build_browser_core_system_prompt(context_text: str = "") -> str:
@@ -11,6 +13,13 @@ def build_browser_core_system_prompt(context_text: str = "") -> str:
     return (
         "You control a real browser through tools.\n"
         "\n"
+                "BATCHING RULE (MANDATORY — you lose efficiency if you ignore this):\n"
+        "1. Before calling any tool, scan the page and list ALL actions you can take RIGHT NOW.\n"
+        "2. Group ALL independent actions into ONE response as a batch.\n"
+        "3. CORRECT: [type_text(field1, value1), type_text(field2, value2), click(button)]\n"
+        "4. WRONG:   [type_text(field1, value1)] then next step [type_text(field2, value2)]\n"
+        "5. Exception: goto_url must be alone (it navigates away).\n"
+        "6. Exception: use_visual_assist must be alone (it analyses the page).\n"
         "Operating rules:\n"
         "- Observe first, then act.\n"
         "- Use inspect_page to understand the live page. It returns:\n"
@@ -24,7 +33,6 @@ def build_browser_core_system_prompt(context_text: str = "") -> str:
         "- Use clickable_hints and fillable_hints to quickly find targets without parsing full JSON.\n"
         "- When dialogs are open, PREFER modal_actionable_hints and modal_fillable_hints "
         "over the general hints — the overlay blocks background elements.\n"
-        "- Choose one meaningful browser action at a time.\n"
         "- Do not invent site-specific flows from memory.\n"
         "- Use only what is visible in the current page snapshot.\n"
         "- If a field or button can be identified from inspect_page, act instead of asking the user.\n"
@@ -40,13 +48,17 @@ def build_browser_core_system_prompt(context_text: str = "") -> str:
         "captcha text, then click the submit button.\n"
         "- If a dialog/modal appears that blocks your task, first try to complete "
         "the required action inside it (e.g., fill a field, click submit).\n"
-        "- If a dialog/modal appears that blocks your task, first try to complete the required action inside it (e.g., fill a field, click submit).\n"
         "- When a dialog is open (inspect_page shows 'dialogs' with content), look at the actionable and fillable elements.\n"
         "- Elements INSIDE the dialog have 'modal': true in inspect_page. Elements on the background have 'modal': false or no 'modal' field.\n"
         "- PREFER elements with 'modal': true when a dialog is open — the overlay blocks clicks on background elements.\n"
         "- If the dialog requires information you don't have (e.g., cover letter, password), do NOT close it — instead call ask_user for help.\n"
         "- Only close a dialog if it's blocking access to the main page AND you've already completed the task inside it.\n"
         "- Ask the user only for credentials, OTP, file upload, captcha, manual confirmation, or a real business choice.\n"
+        "- NEVER invent personal data: cover letters, interview answers, form responses,\n"
+        "  or any text that represents the user's own words.\n"
+        "- If the task requires user-specific text (cover letter, preferences, allergies,\n"
+        "  personal information), call ask_user with a clear prompt.\n"
+        "- You may suggest a draft, but only after offering ask_user first.\n"
         "- Finish only when the task is completed or you intentionally stop at a safe checkpoint.\n"
         "\n"
         "Tool usage rules:\n"
@@ -142,104 +154,7 @@ def build_visual_assist_prompt(
         "4. If you see a captcha image, what text is on it?\n"
         "5. What is the most important action the agent should take next?\n\n"
         "Be specific. Instead of 'there is a button', say 'there is a button "
-        "with text \"Откликнуться\"'. Instead of 'there is a form', say "
-        "'there is a form with a text input labeled \"Сопроводительное письмо\" "
-        "and a submit button \"Отправить\"'.\n\n"
+        "with the exact visible text'. Instead of 'there is a form', say "
+        "'there is a form with input fields and their visible labels'.\n\n"
         "Do NOT return JSON. Do NOT return element_ids. Just describe what you see."
     ).replace("{current_url}", current_url)
-
-
-# ---------------------------------------------------------------------------
-# Adaptive prompt builder — composes the system prompt from blocks depending
-# on the current runtime context (page type, progress, cycles).
-# ---------------------------------------------------------------------------
-
-_PAGE_TYPE_GUIDANCE: dict[PageType, str] = {
-    PageType.SEARCH_RESULTS: (
-        "\n---\n"
-        "📋 PAGE TYPE: SEARCH RESULTS / LISTING\n"
-        "You are on a page with a list of items.\n"
-        "1. Look for clickable item titles or links in the list.\n"
-        "2. Click on an item to open its details.\n"
-        "3. Do NOT click on filters, tabs, checkboxes, or sorting controls.\n"
-        "4. If you don't see items, scroll down to reveal more.\n"
-        "5. After opening an item, look for the primary action button."
-    ),
-    PageType.DETAIL_PAGE: (
-        "\n---\n"
-        "📋 PAGE TYPE: DETAIL PAGE\n"
-        "You are viewing details of a single item.\n"
-        "1. Look for the primary action button (apply, buy, submit, etc.).\n"
-        "2. Scroll to find it if not visible in the viewport.\n"
-        "3. If a form is required, fill it using the user's provided data."
-    ),
-    PageType.FORM_PAGE: (
-        "\n---\n"
-        "📋 PAGE TYPE: FORM\n"
-        "You need to fill in a form.\n"
-        "1. Fill required fields using data from the user's goal.\n"
-        "2. Use type_text with element_id from inspect_page.\n"
-        "3. After filling, look for a submit/save button."
-    ),
-    PageType.LOGIN_PAGE: (
-        "\n---\n"
-        "📋 PAGE TYPE: LOGIN\n"
-        "A login form is visible.\n"
-        "1. If you have credentials, fill them in.\n"
-        "2. If no credentials available, call ask_user."
-    ),
-    PageType.GENERIC_PAGE: "",
-}
-
-_CYCLE_WARNING = (
-    "\n---\n"
-    "⚠️ CYCLE DETECTED: You are repeating the same actions without progress.\n"
-    "STOP. Take a completely different approach:\n"
-    "- Use use_visual_assist to see what's on the page\n"
-    "- Try scrolling to find new content\n"
-    "- Look for elements you haven't tried yet\n"
-    "- If truly stuck, call ask_user for guidance"
-)
-
-_STUCK_TIP = (
-    "\n---\n"
-    "💡 TIP: If you're on a list/search results page, click on an item title/link "
-    "to open it. Don't click on filters, tabs, or sorting controls."
-)
-
-
-def build_adaptive_system_prompt(
-    context_text: str = "",
-    page_type: PageType = PageType.GENERIC_PAGE,
-    no_progress_streak: int = 0,
-    cycle_detected: bool = False,
-) -> str:
-    """Build a system prompt that adapts to the current runtime context.
-
-    Parameters
-    ----------
-    context_text:
-        Optional user-context block appended at the end.
-    page_type:
-        Structural page type detected by ``PageClassifier``.
-    no_progress_streak:
-        Current no-progress counter (used to inject stuck tips).
-    cycle_detected:
-        Whether ``CycleDetector`` has flagged a behavioural cycle.
-    """
-    blocks = [build_browser_core_system_prompt(context_text)]
-
-    # Page-type guidance
-    guidance = _PAGE_TYPE_GUIDANCE.get(page_type, "")
-    if guidance:
-        blocks.append(guidance)
-
-    # Anti-cycle warning (only when a cycle was actually detected)
-    if cycle_detected:
-        blocks.append(_CYCLE_WARNING)
-
-    # Stuck tip (when the agent is struggling but not yet cycling)
-    if no_progress_streak >= 1 and not cycle_detected:
-        blocks.append(_STUCK_TIP)
-
-    return "\n".join(blocks)

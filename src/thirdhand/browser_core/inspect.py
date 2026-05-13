@@ -174,6 +174,7 @@ _INSPECT_PAGE_JS = """
       label: labelTextOf(el).slice(0, 120),
       href: clean(el.getAttribute("href") || "").slice(0, 240),
       html_id: clean(el.getAttribute("id") || "").slice(0, 120),
+      data_qa: clean(el.getAttribute("data-qa") || "").slice(0, 120),
       autocomplete: clean(el.getAttribute("autocomplete") || "").toLowerCase(),
       value_preview: valuePreviewOf(el, fillable),
       fillable,

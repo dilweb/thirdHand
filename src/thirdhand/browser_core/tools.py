@@ -426,9 +426,6 @@ def build_browser_core_tools(session: BrowserSession) -> dict[str, StructuredToo
             return el.dataset.thirdhandId;
           };
 
-          // Pattern that matches common "action" button labels across languages
-          const ACTION_RE = /apply|respond|отклик|купить|buy|add.to.cart|записаться|contact|hire/i;
-
           // ----------------------------------------------------------------
           // PRIMARY: Structural analysis — find repeating parent elements
           // of links with visible text. Works on any site because any card
@@ -461,49 +458,36 @@ def build_browser_core_tools(session: BrowserSession) -> dict[str, StructuredToo
             cardEls = candidates.filter(el => (el.tagName || "").toLowerCase() === bestTag);
           }
 
-          // ----------------------------------------------------------------
-          // FALLBACK: CSS attribute selectors when structural analysis fails
-          // (e.g. when links are nested deeper than one parent level).
-          // ----------------------------------------------------------------
-          if (cardEls.length < 2) {
-            const CARD_SELECTORS = [
-              "article",
-              "[role='article']",
-              "[role='listitem']",
-              "li[class*='vacancy'], li[class*='job'], li[class*='item'], li[class*='product']",
-              "[data-qa*='vacancy'], [data-qa*='serp-item'], [data-qa*='card']",
-              "li[data-id], li[data-item-id]",
-              "tr[data-id], tr[data-item]",
-              "div[class*='card'], div[class*='vacancy'], div[class*='item']",
-            ];
-            for (const sel of CARD_SELECTORS) {
-              try {
-                const found = [...document.querySelectorAll(sel)].filter(isVisible);
-                if (found.length >= 2) {
-                  // Filter out elements that are descendants of other matched elements.
-                  cardEls = found.filter(el =>
-                    !found.some(other => other !== el && other.contains(el))
-                  );
-                  if (cardEls.length >= 2) break;
-                  cardEls = [];
-                }
-              } catch (e) { /* skip invalid selectors */ }
-            }
-          }
+          // If structural analysis yields < 2 cards, return empty array.
+          // The Python caller will fall back to use_visual_assist.
+          // No CSS attribute fallback — those are site-specific.
 
           const items = [];
           for (const card of cardEls.slice(0, maxItems)) {
             // Find the main heading link (most specific first)
             const titleEl =
               card.querySelector("h1 a, h2 a, h3 a, h4 a")
-              || card.querySelector("a[data-qa*='title'], a[class*='title'], a[class*='name']")
+              || card.querySelector("a[class*='title'], a[class*='name']")
               || card.querySelector("a[href]");
 
-            // Find an action button/link (apply, buy, respond …)
-            const actionEl = [...card.querySelectorAll("button, a[href]")]
-              .find(el => ACTION_RE.test(
-                el.innerText || el.getAttribute("aria-label") || ""
-              ));
+            // Find action button by structural HTML attributes (language-agnostic).
+            // Priority:
+            // 1. button[type='submit'] — explicit submit button
+            // 2. input[type='submit'] — submit input
+            // 3. a[role='button'] — link styled as button
+            // 4. button:not([type='button']) — default type=submit
+            // 5. First button or last link in the card (generic fallback)
+            let actionEl = card.querySelector(
+              "button[type='submit'], " +
+              "input[type='submit'], " +
+              "a[role='button'], " +
+              "button:not([type='button'])"
+            );
+            if (!actionEl) {
+              const allBtns = [...card.querySelectorAll("button")];
+              const allLinks = [...card.querySelectorAll("a[href]")];
+              actionEl = allBtns[0] || allLinks[allLinks.length - 1] || null;
+            }
 
             const title = titleEl
               ? clean(titleEl.innerText || titleEl.getAttribute("aria-label") || "").slice(0, 120)
@@ -758,8 +742,21 @@ def _find_by_substring(
     if not needle:
         return candidates[0] if candidates else None
     needle_lower = needle.lower().strip()
+    best = None
+    best_len = 0
     for el in candidates:
         value = (el.get(field) or "").lower().strip()
-        if needle_lower in value:
+        if not value:
+            continue
+        # Exact match — highest priority, return immediately
+        if value == needle_lower:
             return el
-    return None
+        # Needle is contained in value — rank by needle length
+        if needle_lower in value and len(needle_lower) > best_len:
+            best_len = len(needle_lower)
+            best = el
+        # Value is contained in needle — rank by value length
+        if value in needle_lower and len(value) > best_len:
+            best_len = len(value)
+            best = el
+    return best
